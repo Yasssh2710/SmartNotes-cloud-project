@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>My Study Notes — SmartNotes</title>
+  <meta name="description" content="Browse, search, filter, and organize academic notes across subjects.">
+
+  <!-- CDNs -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/notes.css">
+</head>
+<body>
+
+  <!-- Backdrop for Mobile Sidebar -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <div class="app-wrapper">
+    <!-- Sidebar -->
+    <aside class="app-sidebar">
+      <div class="sidebar-header">
+        <a class="brand-logo" href="dashboard.html">
+          <div class="brand-icon">
+            <i class="fa-solid fa-book-open-reader"></i>
+          </div>
+          <div>
+            <div>SmartNotes</div>
+            <div class="brand-tagline">Store. Understand. Revise.</div>
+          </div>
+        </a>
+      </div>
+
+      <div class="sidebar-nav">
+        <div class="nav-section-title">Academic Space</div>
+        <a href="dashboard.html" class="sidebar-link">
+          <i class="fa-solid fa-house"></i>
+          <span>Dashboard</span>
+        </a>
+        <a href="notes.html" class="sidebar-link active">
+          <i class="fa-solid fa-note-sticky"></i>
+          <span>My Notes</span>
+        </a>
+        <a href="subjects.html" class="sidebar-link">
+          <i class="fa-solid fa-layer-group"></i>
+          <span>Subjects</span>
+        </a>
+        <a href="upload.html" class="sidebar-link">
+          <i class="fa-solid fa-cloud-arrow-up"></i>
+          <span>Upload Notes</span>
+        </a>
+
+        <div class="nav-section-title">AI Revision</div>
+        <a href="summary.html" class="sidebar-link">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span>AI Summary</span>
+          <span class="sidebar-badge">Smart</span>
+        </a>
+        <a href="quiz.html" class="sidebar-link">
+          <i class="fa-solid fa-circle-question"></i>
+          <span>AI Quiz</span>
+        </a>
+
+        <div class="nav-section-title">User</div>
+        <a href="profile.html" class="sidebar-link">
+          <i class="fa-regular fa-id-badge"></i>
+          <span>Profile</span>
+        </a>
+        <a href="settings.html" class="sidebar-link">
+          <i class="fa-solid fa-gear"></i>
+          <span>Settings</span>
+        </a>
+        <a href="#" class="sidebar-link text-danger" onclick="logoutUser(); return false;">
+          <i class="fa-solid fa-arrow-right-from-bracket text-danger"></i>
+          <span>Logout</span>
+        </a>
+      </div>
+
+      <div class="sidebar-footer">
+        <a href="profile.html" class="user-profile-summary">
+          <div class="user-avatar student-avatar-initials">AS</div>
+          <div class="user-info">
+            <div class="user-name student-name-display">Alex Student</div>
+            <div class="user-email student-email-display">student@smartnotes.demo</div>
+          </div>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <div class="app-main">
+      <!-- Top Navigation Header -->
+      <header class="app-header">
+        <div class="d-flex align-items-center gap-3">
+          <button class="icon-btn d-lg-none" id="sidebarToggle" type="button" aria-label="Toggle menu">
+            <i class="fa-solid fa-bars"></i>
+          </button>
+          <div class="header-search">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input type="text" class="header-search-input" id="globalSearchInput" placeholder="Search notes, subjects, tags... (Press Enter)">
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="icon-btn theme-toggle-btn" type="button" title="Toggle dark/light mode">
+            <i class="fa-solid fa-moon"></i>
+          </button>
+
+          <!-- User Avatar Dropdown -->
+          <div class="dropdown">
+            <button class="btn p-0 border-0" type="button" data-bs-toggle="dropdown" aria-expanded="false">
+              <div class="user-avatar student-avatar-initials" style="width: 38px; height: 38px;">AS</div>
+            </button>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li class="px-3 py-2 border-bottom">
+                <div class="font-weight-700 student-name-display" style="font-size: 0.9rem;">Alex Student</div>
+                <div class="text-muted student-email-display" style="font-size: 0.75rem;">student@smartnotes.demo</div>
+              </li>
+              <li><a class="dropdown-item mt-1" href="profile.html"><i class="fa-regular fa-user"></i> My Profile</a></li>
+              <li><a class="dropdown-item" href="settings.html"><i class="fa-solid fa-gear"></i> Settings</a></li>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item text-danger" href="#" onclick="logoutUser(); return false;"><i class="fa-solid fa-arrow-right-from-bracket"></i> Logout</a></li>
+            </ul>
+          </div>
+        </div>
+      </header>
+
+      <!-- Page Content -->
+      <main class="app-content">
+        <!-- Page Header -->
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">My Study Notes</h1>
+            <p class="page-subtitle">Organize, filter, search, and manage your academic knowledge base.</p>
+          </div>
+          <div class="d-flex gap-2">
+            <a href="create-note.html" class="btn btn-primary">
+              <i class="fa-solid fa-plus"></i> Create Note
+            </a>
+          </div>
+        </div>
+
+        <!-- Filter Pills Bar -->
+        <div class="notes-filter-pills">
+          <button type="button" class="filter-pill active" data-subject="all">
+            <i class="fa-solid fa-border-all me-1"></i> All Notes
+          </button>
+          <button type="button" class="filter-pill" data-subject="Cloud Computing">
+            <i class="fa-solid fa-cloud me-1"></i> Cloud Computing
+          </button>
+          <button type="button" class="filter-pill" data-subject="DBMS">
+            <i class="fa-solid fa-database me-1"></i> DBMS
+          </button>
+          <button type="button" class="filter-pill" data-subject="Computer Networks">
+            <i class="fa-solid fa-network-wired me-1"></i> CNS
+          </button>
+          <button type="button" class="filter-pill" data-subject="Artificial Intelligence">
+            <i class="fa-solid fa-brain me-1"></i> AI
+          </button>
+          <button type="button" class="filter-pill" data-subject="Operating Systems">
+            <i class="fa-solid fa-microchip me-1"></i> OS
+          </button>
+          <button type="button" class="filter-pill" data-subject="Data Structures">
+            <i class="fa-solid fa-diagram-project me-1"></i> DSA
+          </button>
+        </div>
+
+        <!-- Notes Controls Toolbar -->
+        <div class="notes-toolbar">
+          <div class="search-box-notes">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input type="text" class="form-control" id="notesSearchInput" placeholder="Filter by title, tags, or topic...">
+          </div>
+
+          <div class="d-flex align-items-center gap-3">
+            <div class="d-flex align-items-center gap-2">
+              <label for="notesSortSelect" class="form-label mb-0 text-muted" style="font-size: 0.85rem; white-space: nowrap;">Sort by:</label>
+              <select class="form-select form-select-sm" id="notesSortSelect" style="width: 140px;">
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="title-asc">Title (A-Z)</option>
+                <option value="title-desc">Title (Z-A)</option>
+              </select>
+            </div>
+
+            <div class="view-toggle-group">
+              <button type="button" class="view-toggle-btn active" id="btnViewGrid" title="Grid View">
+                <i class="fa-solid fa-grip"></i>
+              </button>
+              <button type="button" class="view-toggle-btn" id="btnViewList" title="List View">
+                <i class="fa-solid fa-list"></i>
+              </button>
+            </div>
+
+            <span class="badge bg-secondary-subtle text-secondary" id="notesCountDisplay">0 notes</span>
+          </div>
+        </div>
+
+        <!-- Notes Container -->
+        <div class="row" id="notesContainer">
+          <!-- Dynamically populated by notes.js -->
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Delete Note Confirmation Modal -->
+  <div class="modal fade" id="deleteNoteModal" tabindex="-1" aria-labelledby="deleteNoteModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title font-weight-700" id="deleteNoteModalLabel">
+            <i class="fa-solid fa-triangle-exclamation text-danger me-2"></i> Confirm Deletion
+          </h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          Are you sure you want to delete <strong id="deleteNoteTitle">this note</strong>? This action cannot be undone.
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-light-custom" data-bs-dismiss="modal">Cancel</button>
+          <button type="button" class="btn btn-danger" onclick="confirmDeleteNote()">
+            <i class="fa-regular fa-trash-can me-1"></i> Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="js/main.js"></script>
+  <script src="js/notes.js"></script>
+</body>
+</html>

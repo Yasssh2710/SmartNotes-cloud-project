@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartNotes — Store. Understand. Revise.</title>
+  <meta name="description" content="SmartNotes is a modern student-focused study notes and revision management web application with AI summaries and revision quizzes.">
+
+  <!-- CDNs -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    /* Landing Page Specific Enhancements */
+    .landing-nav {
+      background-color: rgba(255, 255, 255, 0.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--border-color);
+      position: sticky;
+      top: 0;
+      z-index: 1050;
+    }
+    [data-theme="dark"] .landing-nav {
+      background-color: rgba(17, 24, 39, 0.92);
+    }
+    .hero-section {
+      padding: 5rem 0 4rem;
+      background: radial-gradient(circle at 50% 0%, rgba(79, 70, 229, 0.08) 0%, rgba(248, 250, 252, 0) 70%);
+    }
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.4rem 0.9rem;
+      background-color: var(--primary-light);
+      color: var(--primary);
+      border-radius: 9999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 1.5rem;
+    }
+    .hero-title {
+      font-size: 3.25rem;
+      font-weight: 800;
+      line-height: 1.15;
+      margin-bottom: 1.25rem;
+      letter-spacing: -0.03em;
+    }
+    .hero-subtitle {
+      font-size: 1.2rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+      max-width: 650px;
+      margin: 0 auto 2rem;
+    }
+    .hero-mockup-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-xl);
+      box-shadow: 0 25px 50px -12px rgba(15, 23, 42, 0.15);
+      padding: 1.5rem;
+      position: relative;
+    }
+    .feature-box {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius-lg);
+      padding: 2.25rem 2rem;
+      height: 100%;
+      transition: all var(--transition-normal);
+    }
+    .feature-box:hover {
+      transform: translateY(-5px);
+      box-shadow: var(--shadow-lg);
+      border-color: var(--border-focus);
+    }
+    .step-number {
+      width: 48px;
+      height: 48px;
+      border-radius: 50%;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 800;
+      font-size: 1.25rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin-bottom: 1.25rem;
+      box-shadow: 0 4px 10px rgba(79, 70, 229, 0.35);
+    }
+    .cta-banner {
+      background: linear-gradient(135deg, #4338ca 0%, #3b82f6 100%);
+      border-radius: var(--radius-xl);
+      padding: 4rem 2rem;
+      color: #fff;
+      text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+    .landing-footer {
+      border-top: 1px solid var(--border-color);
+      background-color: var(--bg-surface);
+      padding: 3.5rem 0 2rem;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation -->
+  <nav class="navbar navbar-expand-lg landing-nav py-3">
+    <div class="container">
+      <a class="brand-logo" href="index.html">
+        <div class="brand-icon">
+          <i class="fa-solid fa-book-open-reader"></i>
+        </div>
+        <div>
+          <div>SmartNotes</div>
+          <div class="brand-tagline">Store. Understand. Revise.</div>
+        </div>
+      </a>
+
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#landingNavCollapse">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+
+      <div class="collapse navbar-collapse" id="landingNavCollapse">
+        <ul class="navbar-nav mx-auto mb-2 mb-lg-0">
+          <li class="nav-item"><a class="nav-link px-3" href="#features">Features</a></li>
+          <li class="nav-item"><a class="nav-link px-3" href="#how-it-works">How It Works</a></li>
+          <li class="nav-item"><a class="nav-link px-3" href="#ai-features">AI Tools</a></li>
+          <li class="nav-item"><a class="nav-link px-3" href="#cloud-storage">Cloud Storage</a></li>
+        </ul>
+        <div class="d-flex align-items-center gap-2">
+          <button class="icon-btn theme-toggle-btn me-2" type="button" title="Toggle theme">
+            <i class="fa-solid fa-moon"></i>
+          </button>
+          <a href="login.html" class="btn btn-outline-primary px-3">Sign In</a>
+          <a href="register.html" class="btn btn-primary px-3">Get Started</a>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero Section -->
+  <section class="hero-section text-center">
+    <div class="container">
+      <div class="hero-badge">
+        <i class="fa-solid fa-graduation-cap"></i> Built for Engineering & College Students
+      </div>
+      <h1 class="hero-title">
+        Your Notes.<br>
+        <span style="background: linear-gradient(135deg, #4f46e5, #06b6d4); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Smarter Revision.</span>
+      </h1>
+      <p class="hero-subtitle">
+        Store your study material, organize your notes, generate AI summaries and test your knowledge — all in one centralized cloud platform.
+      </p>
+      <div class="d-flex justify-content-center gap-3 mb-5 flex-wrap">
+        <a href="register.html" class="btn btn-primary px-4 py-2 fs-6">
+          <i class="fa-solid fa-rocket me-1"></i> Get Started Free
+        </a>
+        <a href="dashboard.html" class="btn btn-light-custom px-4 py-2 fs-6">
+          <i class="fa-solid fa-laptop-code me-1"></i> Explore Demo
+        </a>
+      </div>
+
+      <!-- Hero Visual Card Preview -->
+      <div class="row justify-content-center">
+        <div class="col-lg-10">
+          <div class="hero-mockup-card">
+            <div class="d-flex align-items-center justify-content-between pb-3 border-bottom mb-3">
+              <div class="d-flex align-items-center gap-2">
+                <span style="width: 12px; height: 12px; border-radius: 50%; background-color: #ef4444;"></span>
+                <span style="width: 12px; height: 12px; border-radius: 50%; background-color: #f59e0b;"></span>
+                <span style="width: 12px; height: 12px; border-radius: 50%; background-color: #10b981;"></span>
+                <span class="text-muted ms-2" style="font-size: 0.85rem;">smartnotes.demo/dashboard</span>
+              </div>
+              <span class="badge bg-primary-subtle text-primary">Live Frontend MVP</span>
+            </div>
+            <div class="row g-3 text-start">
+              <div class="col-md-3">
+                <div class="p-3 rounded" style="background-color: var(--primary-light);">
+                  <div class="text-primary font-weight-700 fs-4">24</div>
+                  <div class="text-muted" style="font-size: 0.8rem;">Total Notes</div>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="p-3 rounded" style="background-color: var(--secondary-light);">
+                  <div class="text-secondary font-weight-700 fs-4">6</div>
+                  <div class="text-muted" style="font-size: 0.8rem;">Engineering Subjects</div>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="p-3 rounded" style="background-color: var(--warning-light);">
+                  <div class="text-warning font-weight-700 fs-4">12</div>
+                  <div class="text-muted" style="font-size: 0.8rem;">Uploaded Documents</div>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="p-3 rounded" style="background-color: var(--success-light);">
+                  <div class="text-success font-weight-700 fs-4">8</div>
+                  <div class="text-muted" style="font-size: 0.8rem;">AI Quizzes Taken</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Section -->
+  <section id="features" class="py-5" style="background-color: var(--bg-surface);">
+    <div class="container py-4">
+      <div class="text-center mb-5">
+        <span class="badge bg-primary-subtle text-primary mb-2">Core Value Proposition</span>
+        <h2 class="display-6 font-weight-800">Beyond Traditional Cloud Storage</h2>
+        <p class="text-muted mx-auto" style="max-width: 600px;">
+          Traditional cloud storage only lets you Store, Open, and Download. SmartNotes empowers you to Store, Organize, Understand, Summarize, and Test Yourself.
+        </p>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-md-6 col-lg-3">
+          <div class="feature-box">
+            <div class="stat-icon icon-notes mb-3"><i class="fa-solid fa-note-sticky"></i></div>
+            <h4 class="font-weight-700 mb-2">Smart Notes</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">
+              Create rich academic notes with subject tags, syntax-friendly code formatting, and search filters tailored for engineering courses.
+            </p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="feature-box">
+            <div class="stat-icon icon-files mb-3"><i class="fa-solid fa-cloud-arrow-up"></i></div>
+            <h4 class="font-weight-700 mb-2">Cloud Storage</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">
+              Upload PDFs, lecture PPTs, and DOCX documents with simulated progress tracking, ready for Amazon S3 cloud storage integration.
+            </p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="feature-box">
+            <div class="stat-icon icon-subjects mb-3"><i class="fa-solid fa-brain"></i></div>
+            <h4 class="font-weight-700 mb-2">AI Summary</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">
+              Transform 10-page semester notes into concise key bullet points, definitions, and high-yield exam revision tips in seconds.
+            </p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="feature-box">
+            <div class="stat-icon icon-quizzes mb-3"><i class="fa-solid fa-circle-question"></i></div>
+            <h4 class="font-weight-700 mb-2">AI Revision Quiz</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">
+              Test your exam readiness with auto-generated multiple-choice questions with real-time scoring, explanations, and progress metrics.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- How It Works Section -->
+  <section id="how-it-works" class="py-5">
+    <div class="container py-4">
+      <div class="text-center mb-5">
+        <span class="badge bg-secondary-subtle text-secondary mb-2">Workflow</span>
+        <h2 class="display-6 font-weight-800">How SmartNotes Works</h2>
+        <p class="text-muted mx-auto" style="max-width: 550px;">A four-step streamlined academic revision cycle designed for maximum retention.</p>
+      </div>
+
+      <div class="row g-4">
+        <div class="col-md-6 col-lg-3">
+          <div class="card-custom p-4 h-100">
+            <div class="step-number">1</div>
+            <h4 class="font-weight-700 mb-2">Create or Upload</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">Write notes directly or drag and drop textbook excerpts, lecture slides, and PDF assignments.</p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="card-custom p-4 h-100">
+            <div class="step-number">2</div>
+            <h4 class="font-weight-700 mb-2">Organize by Subject</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">Categorize under Cloud Computing, DBMS, Networks, AI, Operating Systems, or Data Structures.</p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="card-custom p-4 h-100">
+            <div class="step-number">3</div>
+            <h4 class="font-weight-700 mb-2">Generate AI Summaries</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">Extract crucial concepts, core definitions, and exam cheat sheets powered by AI.</p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="card-custom p-4 h-100">
+            <div class="step-number">4</div>
+            <h4 class="font-weight-700 mb-2">Take Revision Quizzes</h4>
+            <p class="text-muted" style="font-size: 0.9rem;">Validate your understanding with simulated 5-question quizzes and review in-depth explanations.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- AI Features Deep Dive -->
+  <section id="ai-features" class="py-5" style="background-color: var(--bg-surface);">
+    <div class="container py-4">
+      <div class="row align-items-center g-5">
+        <div class="col-lg-6">
+          <span class="badge bg-primary-subtle text-primary mb-2">Intelligent Revision</span>
+          <h2 class="display-6 font-weight-800 mb-3">AI Note Summary & Interactive Testing</h2>
+          <p class="text-muted mb-4">
+            Preparing for engineering semester exams requires synthesizing large volumes of complex documentation. SmartNotes structures your notes into five clear layers:
+          </p>
+          <div class="d-flex flex-column gap-3">
+            <div class="d-flex align-items-start gap-3">
+              <i class="fa-solid fa-circle-check text-primary mt-1"></i>
+              <div>
+                <strong class="text-main">Quick Executive Summary:</strong>
+                <p class="text-muted mb-0" style="font-size: 0.9rem;">High-level synthesis covering the entire topic in 2-3 dense sentences.</p>
+              </div>
+            </div>
+            <div class="d-flex align-items-start gap-3">
+              <i class="fa-solid fa-circle-check text-primary mt-1"></i>
+              <div>
+                <strong class="text-main">Important Definitions:</strong>
+                <p class="text-muted mb-0" style="font-size: 0.9rem;">Dedicated terms and definitions formatted for quick memorization.</p>
+              </div>
+            </div>
+            <div class="d-flex align-items-start gap-3">
+              <i class="fa-solid fa-circle-check text-primary mt-1"></i>
+              <div>
+                <strong class="text-main">Exam Revision Checklist:</strong>
+                <p class="text-muted mb-0" style="font-size: 0.9rem;">High-yield tips that university examiners specifically look for in answers.</p>
+              </div>
+            </div>
+          </div>
+          <div class="mt-4">
+            <a href="summary.html" class="btn btn-primary me-2">Try AI Summary Demo</a>
+            <a href="quiz.html" class="btn btn-outline-primary">Try Revision Quiz</a>
+          </div>
+        </div>
+        <div class="col-lg-6">
+          <div class="card-custom p-4 shadow-lg border-primary" style="background: var(--bg-subtle);">
+            <div class="d-flex align-items-center justify-content-between border-bottom pb-3 mb-3">
+              <div class="d-flex align-items-center gap-2">
+                <i class="fa-solid fa-wand-magic-sparkles text-primary"></i>
+                <span class="font-weight-700">AI Summary Preview</span>
+              </div>
+              <span class="badge bg-success-subtle text-success">Cloud Computing</span>
+            </div>
+            <h5 class="font-weight-700">AWS EC2 and S3 Basics</h5>
+            <p class="text-muted" style="font-size: 0.9rem;">
+              "Amazon EC2 provides resizable virtual computing capacity while Amazon S3 offers highly scalable object storage designed for 99.999999999% durability..."
+            </p>
+            <div class="p-3 bg-white rounded mb-2 border">
+              <strong style="font-size: 0.85rem;" class="text-primary">Important Definition:</strong>
+              <div style="font-size: 0.85rem;" class="text-muted">AMI: Pre-configured template for launching EC2 instances with OS and software.</div>
+            </div>
+            <div class="d-flex justify-content-end">
+              <span class="badge bg-primary text-white">5 Keywords Extracted</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cloud Storage Architecture Preview -->
+  <section id="cloud-storage" class="py-5">
+    <div class="container py-4">
+      <div class="text-center mb-5">
+        <span class="badge bg-info-subtle text-info mb-2">Cloud Computing Project</span>
+        <h2 class="display-6 font-weight-800">Designed for Future Cloud & AI Integration</h2>
+        <p class="text-muted mx-auto" style="max-width: 620px;">
+          Architected for clean decoupling. This frontend MVP connects seamlessly into a Python Flask REST API, Amazon S3 bucket storage, and Google Gemini 1.5 API.
+        </p>
+      </div>
+
+      <div class="row g-4 justify-content-center text-center">
+        <div class="col-md-3">
+          <div class="card-custom p-4">
+            <i class="fa-brands fa-python text-primary fs-1 mb-2"></i>
+            <h5 class="font-weight-700">Python Flask</h5>
+            <p class="text-muted mb-0" style="font-size: 0.85rem;">REST API backend with secure route handlers and session tokens.</p>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card-custom p-4">
+            <i class="fa-brands fa-aws text-warning fs-1 mb-2"></i>
+            <h5 class="font-weight-700">Amazon S3 & EC2</h5>
+            <p class="text-muted mb-0" style="font-size: 0.85rem;">Scalable cloud object storage and Docker-based AWS EC2 deployment.</p>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card-custom p-4">
+            <i class="fa-solid fa-microchip text-info fs-1 mb-2"></i>
+            <h5 class="font-weight-700">Google Gemini API</h5>
+            <p class="text-muted mb-0" style="font-size: 0.85rem;">Multimodal LLM generation for automated note summaries and MCQs.</p>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card-custom p-4">
+            <i class="fa-brands fa-docker text-secondary fs-1 mb-2"></i>
+            <h5 class="font-weight-700">Docker Container</h5>
+            <p class="text-muted mb-0" style="font-size: 0.85rem;">Reproducible containerized environment ready for production CI/CD.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA Banner -->
+  <section class="container py-5">
+    <div class="cta-banner">
+      <h2 class="display-6 font-weight-800 mb-3 text-white">Ready to Ace Your Semester Exams?</h2>
+      <p class="text-white-50 mx-auto mb-4" style="max-width: 580px; font-size: 1.1rem;">
+        Start organizing your engineering study notes, generating AI summaries, and testing yourself with revision quizzes.
+      </p>
+      <div class="d-flex justify-content-center gap-3 flex-wrap">
+        <a href="dashboard.html" class="btn btn-banner-primary fs-6 px-4 py-2">
+          <i class="fa-solid fa-arrow-right"></i> Launch Student Dashboard
+        </a>
+        <a href="login.html" class="btn btn-banner-secondary fs-6 px-4 py-2">
+          <i class="fa-solid fa-user-lock"></i> Demo Login
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="landing-footer">
+    <div class="container">
+      <div class="row g-4 mb-4">
+        <div class="col-md-4">
+          <a class="brand-logo mb-2" href="index.html">
+            <div class="brand-icon">
+              <i class="fa-solid fa-book-open-reader"></i>
+            </div>
+            <div>
+              <div>SmartNotes</div>
+              <div class="brand-tagline">Store. Understand. Revise.</div>
+            </div>
+          </a>
+          <p class="text-muted mt-2" style="font-size: 0.9rem;">
+            A student-focused cloud revision management platform designed for college engineering courses.
+          </p>
+        </div>
+        <div class="col-md-2 col-6">
+          <h6 class="font-weight-700 mb-3">Navigation</h6>
+          <ul class="list-unstyled d-flex flex-column gap-2" style="font-size: 0.875rem;">
+            <li><a href="dashboard.html" class="text-muted">Dashboard</a></li>
+            <li><a href="notes.html" class="text-muted">My Notes</a></li>
+            <li><a href="subjects.html" class="text-muted">Subjects</a></li>
+            <li><a href="upload.html" class="text-muted">Upload Material</a></li>
+          </ul>
+        </div>
+        <div class="col-md-2 col-6">
+          <h6 class="font-weight-700 mb-3">AI Tools</h6>
+          <ul class="list-unstyled d-flex flex-column gap-2" style="font-size: 0.875rem;">
+            <li><a href="summary.html" class="text-muted">AI Note Summary</a></li>
+            <li><a href="quiz.html" class="text-muted">AI Revision Quiz</a></li>
+            <li><a href="quiz-result.html" class="text-muted">Quiz Results</a></li>
+          </ul>
+        </div>
+        <div class="col-md-4">
+          <h6 class="font-weight-700 mb-3">Project Details</h6>
+          <p class="text-muted mb-2" style="font-size: 0.85rem;">
+            <strong>College Cloud Computing Mini Project</strong><br>
+            Frontend MVP Stage • Pure HTML5, CSS3, Vanilla JS.
+          </p>
+          <div class="text-muted" style="font-size: 0.8rem;">
+            <i class="fa-solid fa-code text-primary me-1"></i> Future Backend: Python Flask &bull; AWS EC2 &bull; Amazon S3
+          </div>
+        </div>
+      </div>
+      <div class="pt-3 border-top text-center text-muted" style="font-size: 0.85rem;">
+        &copy; 2026 SmartNotes. Designed for College Cloud Computing Mini Project demonstration.
+      </div>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>

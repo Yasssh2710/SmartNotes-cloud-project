@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+package-lock.json.log
+
+# Environment variables & Secrets
+.env
+.env.*
+!.env.example
+
+# Local SQLite Database Files
+database/*.db
+database/*.db-journal
+database/*.db-wal
+database/*.db-shm
+database/*.sqlite
+database/*.sqlite3
+*.db
+*.sqlite
+
+# User Uploaded Files & Storage Cache
+uploads/*
+!uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Operating System & IDE Artifacts
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+scratch/

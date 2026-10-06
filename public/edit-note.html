@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edit Study Note — SmartNotes</title>
+  <meta name="description" content="Edit and refine existing study notes.">
+
+  <!-- CDNs -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/forms.css">
+</head>
+<body>
+
+  <!-- Backdrop for Mobile Sidebar -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <div class="app-wrapper">
+    <!-- Sidebar -->
+    <aside class="app-sidebar">
+      <div class="sidebar-header">
+        <a class="brand-logo" href="dashboard.html">
+          <div class="brand-icon">
+            <i class="fa-solid fa-book-open-reader"></i>
+          </div>
+          <div>
+            <div>SmartNotes</div>
+            <div class="brand-tagline">Store. Understand. Revise.</div>
+          </div>
+        </a>
+      </div>
+
+      <div class="sidebar-nav">
+        <div class="nav-section-title">Academic Space</div>
+        <a href="dashboard.html" class="sidebar-link">
+          <i class="fa-solid fa-house"></i>
+          <span>Dashboard</span>
+        </a>
+        <a href="notes.html" class="sidebar-link active">
+          <i class="fa-solid fa-note-sticky"></i>
+          <span>My Notes</span>
+        </a>
+        <a href="subjects.html" class="sidebar-link">
+          <i class="fa-solid fa-layer-group"></i>
+          <span>Subjects</span>
+        </a>
+        <a href="upload.html" class="sidebar-link">
+          <i class="fa-solid fa-cloud-arrow-up"></i>
+          <span>Upload Notes</span>
+        </a>
+
+        <div class="nav-section-title">AI Revision</div>
+        <a href="summary.html" class="sidebar-link">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span>AI Summary</span>
+          <span class="sidebar-badge">Smart</span>
+        </a>
+        <a href="quiz.html" class="sidebar-link">
+          <i class="fa-solid fa-circle-question"></i>
+          <span>AI Quiz</span>
+        </a>
+
+        <div class="nav-section-title">User</div>
+        <a href="profile.html" class="sidebar-link">
+          <i class="fa-regular fa-id-badge"></i>
+          <span>Profile</span>
+        </a>
+        <a href="settings.html" class="sidebar-link">
+          <i class="fa-solid fa-gear"></i>
+          <span>Settings</span>
+        </a>
+        <a href="#" class="sidebar-link text-danger" onclick="logoutUser(); return false;">
+          <i class="fa-solid fa-arrow-right-from-bracket text-danger"></i>
+          <span>Logout</span>
+        </a>
+      </div>
+
+      <div class="sidebar-footer">
+        <a href="profile.html" class="user-profile-summary">
+          <div class="user-avatar student-avatar-initials">AS</div>
+          <div class="user-info">
+            <div class="user-name student-name-display">Alex Student</div>
+            <div class="user-email student-email-display">student@smartnotes.demo</div>
+          </div>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <div class="app-main">
+      <!-- Top Navigation Header -->
+      <header class="app-header">
+        <div class="d-flex align-items-center gap-3">
+          <button class="icon-btn d-lg-none" id="sidebarToggle" type="button" aria-label="Toggle menu">
+            <i class="fa-solid fa-bars"></i>
+          </button>
+          <div class="d-flex align-items-center gap-2">
+            <a href="notes.html" class="text-muted"><i class="fa-solid fa-arrow-left"></i> Back to Notes</a>
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="icon-btn theme-toggle-btn" type="button" title="Toggle dark/light mode">
+            <i class="fa-solid fa-moon"></i>
+          </button>
+          <div class="user-avatar student-avatar-initials" style="width: 38px; height: 38px;">AS</div>
+        </div>
+      </header>
+
+      <!-- Page Content -->
+      <main class="app-content">
+        <div class="page-header">
+          <div>
+            <h1 class="page-title">Edit Study Note</h1>
+            <p class="page-subtitle">Update and refine your syllabus content and revision tags.</p>
+          </div>
+        </div>
+
+        <div class="row justify-content-center">
+          <div class="col-lg-10">
+            <div class="form-card">
+              <form id="editNoteForm">
+                <input type="hidden" id="editNoteId">
+                <div class="row">
+                  <div class="col-md-8 mb-3">
+                    <div class="form-group">
+                      <label for="editNoteTitle" class="form-label">Note Title <span class="text-danger">*</span></label>
+                      <input type="text" class="form-control" id="editNoteTitle" required>
+                    </div>
+                  </div>
+
+                  <div class="col-md-4 mb-3">
+                    <div class="form-group">
+                      <label for="editNoteSubject" class="form-label">Subject <span class="text-danger">*</span></label>
+                      <select class="form-select" id="editNoteSubject" required>
+                        <option value="Cloud Computing">Cloud Computing</option>
+                        <option value="DBMS">DBMS</option>
+                        <option value="Computer Networks">Computer Networks</option>
+                        <option value="Artificial Intelligence">Artificial Intelligence</option>
+                        <option value="Operating Systems">Operating Systems</option>
+                        <option value="Data Structures">Data Structures</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row">
+                  <div class="col-md-6 mb-3">
+                    <div class="form-group">
+                      <label for="editNoteTopic" class="form-label">Topic / Unit</label>
+                      <input type="text" class="form-control" id="editNoteTopic">
+                    </div>
+                  </div>
+
+                  <div class="col-md-6 mb-3">
+                    <div class="form-group">
+                      <label for="editNoteTags" class="form-label">Tags (comma separated)</label>
+                      <input type="text" class="form-control" id="editNoteTags">
+                    </div>
+                  </div>
+                </div>
+
+                <div class="form-group mb-4">
+                  <label for="editNoteContent" class="form-label">Note Content <span class="text-danger">*</span></label>
+                  <textarea class="form-control note-editor-textarea" id="editNoteContent" required></textarea>
+                </div>
+
+                <!-- Form Action Buttons -->
+                <div class="d-flex align-items-center justify-content-between pt-3 border-top flex-wrap gap-2">
+                  <a href="notes.html" class="btn btn-light-custom">
+                    Cancel
+                  </a>
+                  <button type="submit" class="btn btn-primary" id="btnUpdateNote">
+                    <i class="fa-solid fa-arrows-rotate"></i> Update Note
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="js/main.js"></script>
+  <script src="js/notes.js"></script>
+</body>
+</html>

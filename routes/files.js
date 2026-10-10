@@ -11,6 +11,15 @@ const db = require('../database/db');
 const s3Service = require('../services/s3.js');
 const { extractTextFromFile, inspectPdfText } = require('../services/extractor');
 
+// Ensure database migrations run before upload routes execute
+if (db && typeof db.migrateSchema === 'function') {
+  try {
+    db.migrateSchema();
+  } catch (migErr) {
+    console.warn('[Files Route] Schema migration check notice:', migErr.message);
+  }
+}
+
 // Configure Multer in memory with 25 MB limit
 const upload = multer({
   storage: multer.memoryStorage(),

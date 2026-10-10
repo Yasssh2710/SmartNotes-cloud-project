@@ -616,6 +616,79 @@ async function main() {
     assert.strictEqual(count.cnt, 1, 'There must be exactly 1 note per file_id');
   });
 
+  await runTest('Migration: Backward-compatible migration adds missing status column to legacy databases without data loss', () => {
+    const Database = require('better-sqlite3');
+    const legacyDb = new Database(':memory:');
+
+    // Create legacy schema exactly as deployed in older versions (WITHOUT status, status_message, is_ocr, file_data)
+    legacyDb.exec(`
+      CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT);
+      CREATE TABLE files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        original_filename TEXT NOT NULL,
+        s3_key TEXT NOT NULL,
+        file_type TEXT,
+        file_size INTEGER,
+        uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO users VALUES (1, 'Student');
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size)
+      VALUES (1, 'existing_student_notes.pdf', 'db:existing.pdf', 'application/pdf', 2048);
+    `);
+
+    // Verify status column initially does NOT exist
+    const initialCols = legacyDb.prepare('PRAGMA table_info(files)').all().map(c => c.name.toLowerCase());
+    assert(!initialCols.includes('status'), 'Legacy table must not have status column initially');
+
+    // Helper function mimicking db.js safeAddColumn on legacyDb
+    function migrateLegacyDb(database) {
+      const safeAdd = (table, col, def) => {
+        const cols = database.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name.toLowerCase());
+        if (!cols.includes(col.toLowerCase())) {
+          database.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def};`);
+        }
+      };
+      safeAdd('files', 'subject', 'TEXT');
+      safeAdd('files', 'extracted_text', 'TEXT');
+      safeAdd('files', 'file_data', 'BLOB');
+      safeAdd('files', 'status', "TEXT DEFAULT 'ready'");
+      safeAdd('files', 'status_message', 'TEXT');
+      safeAdd('files', 'is_ocr', 'INTEGER DEFAULT 0');
+      database.exec("UPDATE files SET status = 'ready' WHERE status IS NULL OR status = '';");
+    }
+
+    // Execute migration
+    migrateLegacyDb(legacyDb);
+
+    // Verify columns added
+    const migratedCols = legacyDb.prepare('PRAGMA table_info(files)').all().map(c => c.name.toLowerCase());
+    assert(migratedCols.includes('status'), 'Migrated table must now include status column');
+    assert(migratedCols.includes('status_message'), 'Migrated table must include status_message column');
+    assert(migratedCols.includes('is_ocr'), 'Migrated table must include is_ocr column');
+    assert(migratedCols.includes('file_data'), 'Migrated table must include file_data column');
+
+    // Verify existing user data was preserved (no data loss!)
+    const existingFile = legacyDb.prepare('SELECT id, original_filename, status FROM files WHERE id = 1').get();
+    assert(existingFile, 'Existing file row must still exist after migration');
+    assert.strictEqual(existingFile.original_filename, 'existing_student_notes.pdf');
+    assert.strictEqual(existingFile.status, 'ready', 'Existing rows must default to ready status');
+
+    // Verify queries with status column execute cleanly
+    const insertRes = legacyDb.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, status, status_message, is_ocr)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(1, 'new_upload.pdf', 'db:new.pdf', 'application/pdf', 4096, 'processing', 'Extracting OCR...', 1);
+    assert(insertRes.lastInsertRowid > 1, 'Inserting into migrated table with status column must succeed');
+
+    // Verify idempotency (running migration again does not throw or duplicate)
+    migrateLegacyDb(legacyDb);
+    const finalCols = legacyDb.prepare('PRAGMA table_info(files)').all().map(c => c.name.toLowerCase());
+    assert.strictEqual(finalCols.filter(c => c === 'status').length, 1, 'Status column must not be duplicated');
+
+    legacyDb.close();
+  });
+
   // =========================================================================
   // 8. AI & GEMINI INTEGRATION TESTS
   // =========================================================================

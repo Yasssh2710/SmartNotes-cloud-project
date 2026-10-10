@@ -62,6 +62,11 @@ function initDatabase() {
       file_type TEXT,
       file_size INTEGER,
       file_data BLOB,
+      subject TEXT,
+      extracted_text TEXT,
+      status TEXT DEFAULT 'ready',
+      status_message TEXT,
+      is_ocr INTEGER DEFAULT 0,
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE SET NULL
@@ -102,23 +107,53 @@ function initDatabase() {
   seedDemoData();
 }
 
+/**
+ * Safely adds a column to an SQLite table only when it does not already exist.
+ * Preserves all existing table data without dropping or recreating tables.
+ * @param {string} tableName - Target table name
+ * @param {string} columnName - Target column name
+ * @param {string} columnDefinition - Column type and constraints (e.g. "TEXT DEFAULT 'ready'")
+ */
+function safeAddColumn(tableName, columnName, columnDefinition) {
+  try {
+    const tableInfo = db.prepare(`PRAGMA table_info(${tableName})`).all();
+    const existingCols = tableInfo.map(c => (c.name || '').toLowerCase());
+    if (!existingCols.includes(columnName.toLowerCase())) {
+      console.log(`[DB Migration] Adding missing column "${columnName}" to table "${tableName}"...`);
+      db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition};`);
+      console.log(`[DB Migration] Successfully added column "${columnName}" to "${tableName}".`);
+    }
+  } catch (err) {
+    if (!err.message || !err.message.toLowerCase().includes('duplicate column name')) {
+      console.warn(`[DB Migration Notice] Column "${columnName}" on "${tableName}":`, err.message);
+    }
+  }
+}
+
+/**
+ * Runs backward-compatible migrations across all tables before application logic executes.
+ */
 function migrateSchema() {
   try {
-    const fileCols = db.prepare('PRAGMA table_info(files)').all().map(c => c.name);
-    if (!fileCols.includes('subject')) {
-      db.exec('ALTER TABLE files ADD COLUMN subject TEXT;');
-    }
-    if (!fileCols.includes('extracted_text')) {
-      db.exec('ALTER TABLE files ADD COLUMN extracted_text TEXT;');
-    }
-    if (!fileCols.includes('file_data')) {
-      db.exec('ALTER TABLE files ADD COLUMN file_data BLOB;');
-    }
+    // 1. Files table columns required for upload, storage fallback, and OCR status tracking
+    safeAddColumn('files', 'subject', 'TEXT');
+    safeAddColumn('files', 'extracted_text', 'TEXT');
+    safeAddColumn('files', 'file_data', 'BLOB');
+    safeAddColumn('files', 'status', "TEXT DEFAULT 'ready'");
+    safeAddColumn('files', 'status_message', 'TEXT');
+    safeAddColumn('files', 'is_ocr', 'INTEGER DEFAULT 0');
 
-    const noteCols = db.prepare('PRAGMA table_info(notes)').all().map(c => c.name);
-    if (!noteCols.includes('file_id')) {
-      db.exec('ALTER TABLE notes ADD COLUMN file_id INTEGER;');
-    }
+    // Ensure all existing rows without status are updated to 'ready'
+    try {
+      db.exec("UPDATE files SET status = 'ready' WHERE status IS NULL OR status = '';");
+    } catch (_) {}
+
+    // 2. Notes table columns
+    safeAddColumn('notes', 'file_id', 'INTEGER');
+
+    // 3. Subjects table columns
+    safeAddColumn('subjects', 'semester', 'TEXT');
+    safeAddColumn('subjects', 'description', 'TEXT');
   } catch (err) {
     console.warn('[DB Migration Warning]', err.message);
   }
@@ -306,7 +341,11 @@ function seedDemoData() {
   }
 }
 
-// Initialize tables on load
+// Initialize tables and run backward-compatible migrations on load
 initDatabase();
+
+// Expose migrateSchema and safeAddColumn on db object for explicit calls
+db.migrateSchema = migrateSchema;
+db.safeAddColumn = safeAddColumn;
 
 module.exports = db;

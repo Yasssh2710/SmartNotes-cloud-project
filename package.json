@@ -8,6 +8,9 @@
     "dev": "node server.js",
     "test": "node tests/test_api.js"
   },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",

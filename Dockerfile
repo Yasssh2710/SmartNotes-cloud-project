@@ -1,35 +1,41 @@
 # SmartNotes - Docker Containerization
-# Base Image: Lightweight Node.js 20 LTS Alpine with build tools for native SQLite
-FROM node:20-alpine
+# Base Image: Official Node.js 22 LTS Bookworm Slim (glibc)
+# Using Debian glibc prevents segmentation faults (exit code 139) caused by musl libc on Alpine
+FROM node:22-bookworm-slim
 
 # Set working directory inside container
 WORKDIR /app
 
-# Install python and build tools needed for native node modules
-RUN apk add --no-cache python3 make g++
+# Install build tools needed to compile native C++ addons (better-sqlite3)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy package descriptors
 COPY package*.json ./
 
-# Install production dependencies
-RUN npm ci --only=production
+# Install production dependencies and compile native SQLite bindings
+RUN npm ci --omit=dev && npm rebuild better-sqlite3
 
 # Copy application source code
 COPY . .
 
-# Ensure database directory exists
+# Ensure database and uploads directories exist
 RUN mkdir -p database uploads
 
 # Set environment variables
 ENV NODE_ENV=production
 ENV PORT=3000
 
-# Expose server port
+# Expose default application port
 EXPOSE 3000
 
-# Health check to ensure server responds
+# Health check to ensure server responds (dynamically uses process.env.PORT or fallback 3000)
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:3000/ || exit 1
+  CMD node -e "const port = process.env.PORT || 3000; fetch('http://localhost:' + port + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 # Start SmartNotes server
 CMD ["node", "server.js"]
+

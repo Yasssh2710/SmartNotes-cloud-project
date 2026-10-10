@@ -51,6 +51,11 @@ app.use('/api/subjects', subjectsRouter);
 const publicPath = path.join(__dirname, 'public');
 app.use(express.static(publicPath));
 
+// Health check endpoint for container and cloud deployments (e.g. Render)
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', uptime: process.uptime() });
+});
+
 // Fallback for SPA/direct navigation to landing page
 app.get('/', (req, res) => {
   res.sendFile(path.join(publicPath, 'index.html'));

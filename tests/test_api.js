@@ -403,15 +403,15 @@ async function main() {
     assert.strictEqual(threw, true, 'Unsupported format must reject');
   });
 
-  await runTest('Errors: Reject oversized files exceeding 10MB limit in OCR service', async () => {
+  await runTest('Errors: Reject oversized files exceeding 25MB limit in OCR service', async () => {
     let threw = false;
-    // Create an 11 MB buffer
-    const largeBuf = Buffer.alloc(11 * 1024 * 1024, 0x20);
+    // Create a 26 MB buffer
+    const largeBuf = Buffer.alloc(26 * 1024 * 1024, 0x20);
     try {
       await ocrService.extractTextFromScannedPDF(largeBuf, { filename: 'large.pdf' });
     } catch (err) {
       threw = true;
-      assert(err.message.includes('exceeds the 10 MB limit'), 'Must specify file size limit exceeded');
+      assert(err.message.includes('exceeds the 25 MB limit'), 'Must specify file size limit exceeded');
     }
     assert.strictEqual(threw, true, 'Oversized file must reject');
   });
@@ -462,6 +462,74 @@ async function main() {
   await runTest('Storage: Fallback gracefully when AWS S3 is not configured', () => {
     const isConfigured = s3Service.isS3Configured();
     assert(typeof isConfigured === 'boolean');
+  });
+
+  await runTest('Storage: Upload and save small text-based PDF to database storage', async () => {
+    const pdfBuf = buildSyntheticTextPdf('Cloud Computing Architecture Virtualization and Containerization');
+    const extracted = await extractTextFromFile(pdfBuf, 'cloud_unit3_sample.pdf', 'application/pdf');
+    assert(extracted.includes('Cloud Computing Architecture'), 'Must extract direct text from text-based PDF');
+
+    const storageRes = await s3Service.uploadFileToStorage({
+      originalname: 'cloud_unit3_sample.pdf',
+      buffer: pdfBuf,
+      mimetype: 'application/pdf',
+      size: pdfBuf.length
+    }, 1);
+
+    assert(storageRes.s3Key, 'Must generate a valid storage key');
+    assert.strictEqual(storageRes.isS3, false, 'Should report isS3 as false when S3 credentials not set');
+    assert.strictEqual(storageRes.storageType, 'database', 'Must report database storage type');
+
+    // Insert into files table with file_data BLOB
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text, file_data)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(1, 'cloud_unit3_sample.pdf', storageRes.s3Key, 'application/pdf', pdfBuf.length, 'Cloud Computing', extracted, pdfBuf);
+
+    assert(insert.lastInsertRowid > 0, 'Must insert file into database');
+
+    // Retrieve file and verify streaming
+    const fileRow = db.prepare('SELECT * FROM files WHERE id = ?').get(insert.lastInsertRowid);
+    assert(fileRow.file_data, 'File record must persist binary file_data BLOB in database');
+
+    const retrieved = await s3Service.getFileFromStorage(fileRow.s3_key, fileRow);
+    assert(retrieved.stream, 'Must return readable stream from database storage');
+  });
+
+  await runTest('Storage: Upload and process scanned PDF with OCR and database persistence', async () => {
+    const scannedBuf = buildSyntheticScannedPdf();
+
+    ocrService.setMockOCRHandler(async (buf, opts) => ({
+      text: '--- Page 1 ---\nScanned Handwritten Notes on Amazon DynamoDB and Key Value Stores.',
+      pagesProcessed: 1,
+      totalPages: 1,
+      isOcr: true
+    }));
+
+    try {
+      const extracted = await extractTextFromFile(scannedBuf, 'CLOUD UNIT3 NOTES.pdf', 'application/pdf');
+      assert(extracted.includes('DynamoDB'), 'Must extract scanned text via OCR');
+
+      const storageRes = await s3Service.uploadFileToStorage({
+        originalname: 'CLOUD UNIT3 NOTES.pdf',
+        buffer: scannedBuf,
+        mimetype: 'application/pdf',
+        size: scannedBuf.length
+      }, 1);
+
+      assert(storageRes.s3Key.startsWith('db:'), 'Storage key must use database prefix db:');
+
+      const insert = db.prepare(`
+        INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text, file_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(1, 'CLOUD UNIT3 NOTES.pdf', storageRes.s3Key, 'application/pdf', scannedBuf.length, 'Cloud Computing', extracted, scannedBuf);
+
+      const savedFile = db.prepare('SELECT id, original_filename, s3_key, extracted_text, file_data FROM files WHERE id = ?').get(insert.lastInsertRowid);
+      assert.strictEqual(savedFile.original_filename, 'CLOUD UNIT3 NOTES.pdf');
+      assert(savedFile.file_data && savedFile.file_data.length > 0, 'Scanned PDF must be persisted in database BLOB');
+    } finally {
+      ocrService.setMockOCRHandler(null);
+    }
   });
 
   // =========================================================================

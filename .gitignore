@@ -20,6 +20,7 @@ database/*.sqlite3
 # User Uploaded Files & Storage Cache
 uploads/*
 !uploads/.gitkeep
+*.traineddata
 
 # Logs
 *.log

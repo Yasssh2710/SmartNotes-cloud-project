@@ -154,7 +154,7 @@ async function createNewSubjectFromUpload(subjectName) {
 async function processSelectedFile(file) {
   const allowedExtensions = ['pdf', 'docx', 'doc', 'txt'];
   const ext = file.name.split('.').pop().toLowerCase();
-  const maxSizeBytes = 10 * 1024 * 1024; // 10MB
+  const maxSizeBytes = 25 * 1024 * 1024; // 25MB limit
 
   if (!allowedExtensions.includes(ext)) {
     showToast('Invalid format. Please upload PDF, DOCX, or TXT.', 'danger');
@@ -162,7 +162,7 @@ async function processSelectedFile(file) {
   }
 
   if (file.size > maxSizeBytes) {
-    showToast('File size exceeds the 10 MB limit.', 'warning');
+    showToast('File size exceeds the 25 MB limit.', 'warning');
     return;
   }
 
@@ -187,24 +187,40 @@ async function uploadFileToBackend(file, subjectName) {
   const progressBar = document.getElementById('uploadProgressBar');
   const progressText = document.getElementById('uploadProgressText');
   const fileNameDisplay = document.getElementById('uploadFileNameDisplay');
+  const fileInput = document.getElementById('fileInput');
+  const browseBtn = document.getElementById('btnBrowseFiles');
 
   const isPdf = file.name.toLowerCase().endsWith('.pdf');
 
+  // Disable file inputs during upload to prevent duplicate submissions
+  if (fileInput) fileInput.disabled = true;
+  if (browseBtn) browseBtn.disabled = true;
+
   if (progressContainer) progressContainer.style.display = 'block';
   if (fileNameDisplay) fileNameDisplay.textContent = file.name;
-  if (progressBar) progressBar.style.width = '25%';
+  if (progressBar) progressBar.style.width = '20%';
   if (progressText) progressText.textContent = isPdf ? 'Analyzing PDF pages & text layer...' : 'Reading document content...';
 
   // Incremental status update during processing
-  const progressTimer = setTimeout(() => {
-    if (progressBar) progressBar.style.width = '55%';
-    if (progressText) progressText.textContent = isPdf ? 'Recognizing text (running OCR for scanned pages)...' : 'Extracting text...';
+  const t1 = setTimeout(() => {
+    if (progressBar) progressBar.style.width = '50%';
+    if (progressText) progressText.textContent = isPdf ? 'Extracting text (OCR for scanned pages)...' : 'Extracting text...';
   }, 1200);
 
-  const finalTimer = setTimeout(() => {
-    if (progressBar) progressBar.style.width = '80%';
-    if (progressText) progressText.textContent = 'Formatting study note & saving...';
+  const t2 = setTimeout(() => {
+    if (progressBar) progressBar.style.width = '75%';
+    if (progressText) progressText.textContent = 'Formatting study note & saving to database...';
   }, 3500);
+
+  const t3 = setTimeout(() => {
+    if (progressBar) progressBar.style.width = '90%';
+    if (progressText) progressText.textContent = 'Finalizing document registration...';
+  }, 10000);
+
+  const controller = new AbortController();
+  const abortTimeout = setTimeout(() => {
+    controller.abort();
+  }, 75000); // 75-second client timeout safeguard
 
   const formData = new FormData();
   formData.append('file', file);
@@ -213,13 +229,21 @@ async function uploadFileToBackend(file, subjectName) {
   try {
     const res = await fetch('/api/files/upload', {
       method: 'POST',
-      body: formData
+      body: formData,
+      signal: controller.signal
     });
 
-    clearTimeout(progressTimer);
-    clearTimeout(finalTimer);
+    clearTimeout(t1);
+    clearTimeout(t2);
+    clearTimeout(t3);
+    clearTimeout(abortTimeout);
 
-    const data = await res.json();
+    let data;
+    try {
+      data = await res.json();
+    } catch (_) {
+      throw new Error(`Server returned error status ${res.status} (${res.statusText || 'Unexpected response'}).`);
+    }
 
     if (progressBar) progressBar.style.width = '100%';
     if (progressText) progressText.textContent = 'Complete!';
@@ -240,11 +264,24 @@ async function uploadFileToBackend(file, subjectName) {
       }
     }, 400);
   } catch (err) {
-    clearTimeout(progressTimer);
-    clearTimeout(finalTimer);
+    clearTimeout(t1);
+    clearTimeout(t2);
+    clearTimeout(t3);
+    clearTimeout(abortTimeout);
     console.error('File upload error:', err);
     if (progressContainer) progressContainer.style.display = 'none';
-    showToast('Failed to upload file. Check server connection.', 'danger');
+
+    if (err.name === 'AbortError') {
+      showToast('Upload timed out. The file took too long to process on the server.', 'danger');
+    } else {
+      showToast(err.message || 'Failed to upload file. Check server connection.', 'danger');
+    }
+  } finally {
+    if (fileInput) {
+      fileInput.disabled = false;
+      fileInput.value = ''; // Reset input to allow re-uploading same file if desired
+    }
+    if (browseBtn) browseBtn.disabled = false;
   }
 }
 
@@ -278,7 +315,7 @@ async function renderRecentUploadsTable() {
       const isS3 = item.isS3;
       const statusBadge = isS3
         ? `<span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-brands fa-aws me-1"></i> Amazon S3</span>`
-        : `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-solid fa-server me-1"></i> Local Storage</span>`;
+        : `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-solid fa-database me-1"></i> Database Storage</span>`;
 
       return `
         <tr>

@@ -16,12 +16,13 @@ const execFilePromise = util.promisify(execFile);
 
 // Resource and processing safeguards for Render free tier (512MB RAM limit)
 const OCR_CONFIG = {
-  maxFileSize: 10 * 1024 * 1024, // 10 MB maximum
-  maxOcrPages: 15,               // Max pages to OCR to prevent timeout & memory exhaustion
+  maxFileSize: 25 * 1024 * 1024, // 25 MB maximum
+  maxOcrPages: 4,                // Max pages to OCR to prevent timeout & memory exhaustion on Render
   dpi: 150,                     // 150 DPI is optimal for OCR accuracy vs RAM/disk usage
-  pageTimeoutMs: 30000,         // 30s per page OCR timeout
-  convertTimeoutMs: 45000,      // 45s PDF-to-image conversion timeout
-  minWordsRequired: 5,          // Minimum meaningful words to consider extraction successful
+  pageTimeoutMs: 15000,         // 15s per page OCR timeout
+  convertTimeoutMs: 30000,      // 30s PDF-to-image conversion timeout
+  totalOcrTimeoutMs: 50000,     // 50s total OCR safeguard timeout
+  minWordsRequired: 3,          // Minimum meaningful words to consider extraction successful
   language: 'eng'               // Default Tesseract language
 };
 
@@ -101,13 +102,21 @@ async function testBinary(name, args = ['--version']) {
   try {
     await execFilePromise(resolved, args, { timeout: 8000 });
     return resolved;
-  } catch (_) {
+  } catch (err) {
+    // pdftoppm -v writes output to stderr in standard poppler
+    if (err && err.stderr && err.stderr.toLowerCase().includes('pdftoppm version')) {
+      return resolved;
+    }
     // If testing resolved path failed, test bare command name
     if (resolved !== name) {
       try {
         await execFilePromise(name, args, { timeout: 8000 });
         return name;
-      } catch (_) {}
+      } catch (err2) {
+        if (err2 && err2.stderr && err2.stderr.toLowerCase().includes('pdftoppm version')) {
+          return name;
+        }
+      }
     }
     return null;
   }
@@ -167,13 +176,18 @@ async function getPdfPageCount(pdfPath, pdfBuffer) {
 
   // 2. Try pdf-parse document metadata
   if (pdfBuffer) {
+    let parser = null;
     try {
-      const parser = new PDFParse({ data: pdfBuffer });
+      parser = new PDFParse({ data: pdfBuffer });
       const info = await parser.getInfo();
-      if (info && info.numPages) {
-        return info.numPages;
+      if (info && (info.total || info.numPages)) {
+        return info.total || info.numPages;
       }
-    } catch (_) {}
+    } catch (_) {} finally {
+      if (parser && typeof parser.destroy === 'function') {
+        try { await parser.destroy(); } catch (_) {}
+      }
+    }
   }
 
   // 3. Regex heuristic on PDF buffer
@@ -236,23 +250,34 @@ async function convertPdfToImagesNative(pdftoppmPath, pdfPath, outputDir, maxPag
  * @returns {Promise<Buffer[]>}
  */
 async function convertPdfToImagesJs(pdfBuffer, maxPages) {
-  const parser = new PDFParse({ data: pdfBuffer });
-  const screenshots = await parser.getScreenshot({ imageBuffer: true });
+  let parser = null;
+  try {
+    parser = new PDFParse({ data: pdfBuffer });
+    const screenshots = await parser.getScreenshot({
+      first: maxPages,
+      imageBuffer: true,
+      imageDataUrl: false // Do not generate base64 strings to save memory
+    });
 
-  if (!screenshots || !screenshots.pages || screenshots.pages.length === 0) {
-    throw new Error('In-memory PDF page renderer produced 0 page screenshots.');
-  }
+    if (!screenshots || !screenshots.pages || screenshots.pages.length === 0) {
+      throw new Error('In-memory PDF page renderer produced 0 page screenshots.');
+    }
 
-  const buffers = [];
-  const count = Math.min(screenshots.pages.length, maxPages);
-  for (let i = 0; i < count; i++) {
-    const page = screenshots.pages[i];
-    if (page && page.data) {
-      buffers.push(Buffer.from(page.data));
+    const buffers = [];
+    const count = Math.min(screenshots.pages.length, maxPages);
+    for (let i = 0; i < count; i++) {
+      const page = screenshots.pages[i];
+      if (page && page.data) {
+        buffers.push(Buffer.from(page.data));
+      }
+    }
+
+    return buffers;
+  } finally {
+    if (parser && typeof parser.destroy === 'function') {
+      try { await parser.destroy(); } catch (_) {}
     }
   }
-
-  return buffers;
 }
 
 /**
@@ -269,11 +294,11 @@ async function ocrImageNative(tesseractPath, imagePath) {
     baseArgs.push('--tessdata-dir', process.env.TESSDATA_PREFIX);
   }
 
-  // Attempt 1: PSM 1 (Automatic page segmentation with Orientation & Script Detection)
+  // Fast direct attempt: PSM 3 (Fully automatic page segmentation)
   try {
     const { stdout } = await execFilePromise(tesseractPath, [
       ...baseArgs,
-      '--psm', '1'
+      '--psm', '3'
     ], {
       timeout: OCR_CONFIG.pageTimeoutMs,
       maxBuffer: 5 * 1024 * 1024
@@ -281,14 +306,14 @@ async function ocrImageNative(tesseractPath, imagePath) {
     const text = (stdout || '').trim();
     if (text.length > 0) return text;
   } catch (_) {
-    // If PSM 1 fails (e.g. OSD module missing or orientation indeterminate), fall back to PSM 3
+    // If PSM 3 fails, fall back to PSM 1
   }
 
-  // Attempt 2: PSM 3 (Fully automatic page segmentation)
+  // Fallback attempt: PSM 1 (Automatic with OSD)
   try {
     const { stdout } = await execFilePromise(tesseractPath, [
       ...baseArgs,
-      '--psm', '3'
+      '--psm', '1'
     ], {
       timeout: OCR_CONFIG.pageTimeoutMs,
       maxBuffer: 5 * 1024 * 1024
@@ -300,13 +325,23 @@ async function ocrImageNative(tesseractPath, imagePath) {
 }
 
 /**
- * Runs OCR on an image buffer using Tesseract.js
+ * Runs OCR on an image buffer using Tesseract.js with local traineddata
  * @param {Buffer} imageBuffer
  * @returns {Promise<string>}
  */
 async function ocrImageJs(imageBuffer) {
   const Tesseract = require('tesseract.js');
-  const result = await Tesseract.recognize(imageBuffer, OCR_CONFIG.language);
+  const projectRoot = path.resolve(__dirname, '..');
+  const options = fs.existsSync(path.join(projectRoot, 'eng.traineddata'))
+    ? { langPath: projectRoot, gzip: false }
+    : (process.env.TESSDATA_PREFIX && fs.existsSync(process.env.TESSDATA_PREFIX) ? { langPath: process.env.TESSDATA_PREFIX, gzip: false } : {});
+
+  const result = await Promise.race([
+    Tesseract.recognize(imageBuffer, OCR_CONFIG.language, options),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Tesseract page recognition timed out')), OCR_CONFIG.pageTimeoutMs)
+    )
+  ]);
   return (result && result.data && result.data.text) ? result.data.text.trim() : '';
 }
 
@@ -322,7 +357,7 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
   }
 
   if (pdfBuffer.length > OCR_CONFIG.maxFileSize) {
-    throw new Error(`File size (${Math.round(pdfBuffer.length / (1024 * 1024))} MB) exceeds the 10 MB limit.`);
+    throw new Error(`File size (${Math.round(pdfBuffer.length / (1024 * 1024))} MB) exceeds the 25 MB limit.`);
   }
 
   // Use test mock handler if active
@@ -346,7 +381,7 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
   const inputPdfPath = path.join(tempDir, 'document.pdf');
   fs.writeFileSync(inputPdfPath, pdfBuffer);
 
-  try {
+  const doOCR = async () => {
     const totalPages = await getPdfPageCount(inputPdfPath, pdfBuffer);
     const maxPages = options.maxPages || OCR_CONFIG.maxOcrPages;
     const pagesToProcess = Math.min(totalPages, maxPages);
@@ -442,6 +477,15 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
       isOcr: true,
       engine: engineUsed
     };
+  };
+
+  try {
+    return await Promise.race([
+      doOCR(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('OCR processing exceeded server time limit.')), OCR_CONFIG.totalOcrTimeoutMs)
+      )
+    ]);
   } finally {
     // Guaranteed disk cleanup
     try {
@@ -464,6 +508,7 @@ module.exports = {
   findSystemBinary,
   testBinary,
   getPdfPageCount,
+  ocrImageJs,
   setMockOCRHandler,
   OCR_CONFIG
 };

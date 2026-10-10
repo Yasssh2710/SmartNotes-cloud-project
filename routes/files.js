@@ -11,15 +11,15 @@ const db = require('../database/db');
 const s3Service = require('../services/s3.js');
 const { extractTextFromFile } = require('../services/extractor');
 
-// Configure Multer in memory
+// Configure Multer in memory with 25 MB limit
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10 MB limit
+    fileSize: 25 * 1024 * 1024 // 25 MB limit
   },
   fileFilter: (req, file, cb) => {
     const allowedExtensions = ['.pdf', '.docx', '.doc', '.txt'];
-    const originalName = file.originalname.toLowerCase();
+    const originalName = (file.originalname || '').toLowerCase();
     const hasValidExt = allowedExtensions.some(ext => originalName.endsWith(ext));
 
     if (!hasValidExt) {
@@ -32,6 +32,14 @@ const upload = multer({
 function getUserId(req) {
   if (req.session && req.session.userId) return req.session.userId;
   return 1; // Demo user fallback
+}
+
+/**
+ * Sanitizes log output to prevent secret leakage
+ */
+function sanitizeLog(text) {
+  if (!text || typeof text !== 'string') return '';
+  return text.replace(/(key=|token=|secret=|bearer\s+)[a-z0-9_\-\.]{10,}/gi, '$1[REDACTED]');
 }
 
 /**
@@ -51,17 +59,22 @@ router.get('/', (req, res) => {
       ORDER BY f.uploaded_at DESC
     `).all(userId);
 
-    const formatted = files.map(file => ({
-      id: file.id,
-      noteId: file.note_id,
-      name: file.original_filename,
-      size: formatFileSize(file.file_size),
-      sizeBytes: file.file_size,
-      subject: file.subject || 'General',
-      date: file.uploaded_at ? file.uploaded_at.split(' ')[0] : new Date().toISOString().split('T')[0],
-      status: file.s3_key.startsWith('local:') ? 'Uploaded (Local)' : 'Uploaded (S3)',
-      isS3: !file.s3_key.startsWith('local:')
-    }));
+    const formatted = files.map(file => {
+      const isS3 = !file.s3_key.startsWith('db:') && !file.s3_key.startsWith('local:');
+      const status = isS3 ? 'Uploaded (S3)' : 'Uploaded (Database)';
+      return {
+        id: file.id,
+        noteId: file.note_id,
+        name: file.original_filename,
+        size: formatFileSize(file.file_size),
+        sizeBytes: file.file_size,
+        subject: file.subject || 'General',
+        date: file.uploaded_at ? file.uploaded_at.split(' ')[0] : new Date().toISOString().split('T')[0],
+        status: status,
+        isS3: isS3,
+        storageType: isS3 ? 's3' : 'database'
+      };
+    });
 
     return res.json({
       success: true,
@@ -70,27 +83,47 @@ router.get('/', (req, res) => {
       files: formatted
     });
   } catch (err) {
-    console.error('[Files] Listing error:', err);
+    console.error('[Files] Listing error:', sanitizeLog(err.message));
     return res.status(500).json({ success: false, error: 'Failed to retrieve uploaded files.' });
   }
 });
 
 /**
  * POST /api/files/upload
- * Handles file upload to S3 or local storage, extracts text, and registers note in My Notes
+ * Handles file upload to S3 or Database persistent storage, extracts text, and registers note in My Notes
  */
 router.post('/upload', (req, res) => {
+  let isResponded = false;
+  const timeoutTimer = setTimeout(() => {
+    if (!isResponded) {
+      isResponded = true;
+      console.error('[Files] Upload processing reached server timeout (60s).');
+      return res.status(504).json({
+        success: false,
+        error: 'Upload processing timed out. Please try a smaller or text-based document.'
+      });
+    }
+  }, 60000);
+
   upload.single('file')(req, res, async (err) => {
+    if (isResponded) return;
+
     if (err instanceof multer.MulterError) {
+      clearTimeout(timeoutTimer);
+      isResponded = true;
       if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(400).json({ success: false, error: 'File size exceeds the 10 MB limit.' });
+        return res.status(400).json({ success: false, error: 'File size exceeds the 25 MB limit.' });
       }
       return res.status(400).json({ success: false, error: `Upload error: ${err.message}` });
     } else if (err) {
+      clearTimeout(timeoutTimer);
+      isResponded = true;
       return res.status(400).json({ success: false, error: err.message });
     }
 
     if (!req.file) {
+      clearTimeout(timeoutTimer);
+      isResponded = true;
       return res.status(400).json({ success: false, error: 'No file was uploaded.' });
     }
 
@@ -98,25 +131,29 @@ router.post('/upload', (req, res) => {
       const userId = getUserId(req);
       const subject = (req.body.subject && req.body.subject.trim()) ? req.body.subject.trim() : 'Cloud Computing';
 
+      console.log(`[Files] Upload received: "${req.file.originalname}" (${formatFileSize(req.file.size)}, MIME: ${req.file.mimetype || 'unknown'}) for subject: "${subject}"`);
+
       // 1. Extract plain text from PDF, DOCX, or TXT
       let extractedText = '';
       try {
         extractedText = await extractTextFromFile(req.file.buffer, req.file.originalname, req.file.mimetype);
       } catch (extErr) {
-        console.error('[Files] Text extraction failed:', extErr.message);
+        clearTimeout(timeoutTimer);
+        isResponded = true;
+        console.error('[Files] Text extraction failed:', sanitizeLog(extErr.message));
         return res.status(400).json({
           success: false,
           error: `Could not read document text: ${extErr.message}`
         });
       }
 
-      // 2. Upload to S3 or local filesystem fallback
-      const { s3Key, isS3 } = await s3Service.uploadFileToStorage(req.file, userId);
+      // 2. Upload to S3 or Database persistent storage fallback
+      const { s3Key, isS3, storageType } = await s3Service.uploadFileToStorage(req.file, userId);
 
-      // 3. Save to files table
+      // 3. Save to files table (including file_data BLOB for persistent storage on Render)
       const fileInsert = db.prepare(`
-        INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text, file_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         userId,
         req.file.originalname,
@@ -124,7 +161,8 @@ router.post('/upload', (req, res) => {
         req.file.mimetype || 'application/octet-stream',
         req.file.size,
         subject,
-        extractedText
+        extractedText,
+        isS3 ? null : req.file.buffer // Store in SQLite BLOB when S3 is not used!
       );
       const fileId = fileInsert.lastInsertRowid;
 
@@ -166,13 +204,19 @@ router.post('/upload', (req, res) => {
         `).run(userId, subject, `Study materials for ${subject}.`, 'Elective');
       } catch (_) {}
 
+      clearTimeout(timeoutTimer);
+      if (isResponded) return;
+      isResponded = true;
+
+      console.log(`[Files] Successfully saved "${req.file.originalname}": fileId=${fileId}, noteId=${noteId}, storage=${isS3 ? 'Amazon S3' : 'Database Storage'}`);
+
       return res.status(201).json({
         success: true,
         message: isOcr
           ? 'File uploaded and scanned pages recognized with OCR into My Notes.'
           : (isS3
             ? 'File uploaded to Amazon S3 and added to My Notes successfully.'
-            : 'File uploaded and added to My Notes successfully (saved locally - S3 not configured).'),
+            : 'File uploaded and added to My Notes successfully (saved in Database storage - S3 not configured).'),
         file: {
           id: fileId,
           noteId: noteId,
@@ -181,11 +225,15 @@ router.post('/upload', (req, res) => {
           subject: subject,
           s3Key: s3Key,
           isS3: isS3,
-          isOcr: isOcr
+          isOcr: isOcr,
+          storageType: storageType || (isS3 ? 's3' : 'database')
         }
       });
     } catch (uploadErr) {
-      console.error('[Files] Processing error:', uploadErr);
+      clearTimeout(timeoutTimer);
+      if (isResponded) return;
+      isResponded = true;
+      console.error('[Files] Processing error:', sanitizeLog(uploadErr.message));
       return res.status(500).json({ success: false, error: uploadErr.message || 'File upload failed.' });
     }
   });
@@ -205,7 +253,7 @@ router.get('/:id/preview', async (req, res) => {
       return res.status(404).send('File not found.');
     }
 
-    const { stream, contentType } = await s3Service.getFileFromStorage(fileRecord.s3_key);
+    const { stream, contentType } = await s3Service.getFileFromStorage(fileRecord.s3_key, fileRecord);
     const isPdf = fileRecord.original_filename.toLowerCase().endsWith('.pdf');
     const mime = isPdf ? 'application/pdf' : (contentType || 'application/octet-stream');
 
@@ -218,7 +266,7 @@ router.get('/:id/preview', async (req, res) => {
       res.send(stream);
     }
   } catch (err) {
-    console.error('[Files] Preview error:', err);
+    console.error('[Files] Preview error:', sanitizeLog(err.message));
     return res.status(500).send('Failed to preview file: ' + err.message);
   }
 });
@@ -237,7 +285,7 @@ router.get('/:id/download', async (req, res) => {
       return res.status(404).send('File not found.');
     }
 
-    const { stream, contentType } = await s3Service.getFileFromStorage(fileRecord.s3_key);
+    const { stream, contentType } = await s3Service.getFileFromStorage(fileRecord.s3_key, fileRecord);
 
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(fileRecord.original_filename)}"`);
@@ -248,7 +296,7 @@ router.get('/:id/download', async (req, res) => {
       res.send(stream);
     }
   } catch (err) {
-    console.error('[Files] Download error:', err);
+    console.error('[Files] Download error:', sanitizeLog(err.message));
     return res.status(500).send('Failed to download file: ' + err.message);
   }
 });
@@ -271,7 +319,7 @@ router.delete('/:id', async (req, res) => {
     try {
       await s3Service.deleteFileFromStorage(fileRecord.s3_key);
     } catch (storageErr) {
-      console.warn('[Files] Storage delete notice:', storageErr.message);
+      console.warn('[Files] Storage delete notice:', sanitizeLog(storageErr.message));
     }
 
     // Delete corresponding note if linked
@@ -283,7 +331,7 @@ router.delete('/:id', async (req, res) => {
     db.prepare('DELETE FROM files WHERE id = ?').run(fileId);
     return res.json({ success: true, message: 'File and associated note deleted successfully.' });
   } catch (err) {
-    console.error('[Files] Deletion error:', err);
+    console.error('[Files] Deletion error:', sanitizeLog(err.message));
     return res.status(500).json({ success: false, error: 'Failed to delete file.' });
   }
 });
@@ -297,3 +345,4 @@ function formatFileSize(bytes) {
 }
 
 module.exports = router;
+

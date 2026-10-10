@@ -61,6 +61,7 @@ function initDatabase() {
       s3_key TEXT NOT NULL,
       file_type TEXT,
       file_size INTEGER,
+      file_data BLOB,
       uploaded_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (note_id) REFERENCES notes(id) ON DELETE SET NULL
@@ -109,6 +110,9 @@ function migrateSchema() {
     }
     if (!fileCols.includes('extracted_text')) {
       db.exec('ALTER TABLE files ADD COLUMN extracted_text TEXT;');
+    }
+    if (!fileCols.includes('file_data')) {
+      db.exec('ALTER TABLE files ADD COLUMN file_data BLOB;');
     }
 
     const noteCols = db.prepare('PRAGMA table_info(notes)').all().map(c => c.name);

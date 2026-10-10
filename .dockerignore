@@ -8,3 +8,4 @@ uploads/
 .gitignore
 README.md
 tests/
+*.traineddata

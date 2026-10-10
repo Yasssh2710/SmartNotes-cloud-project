@@ -57,19 +57,22 @@ router.post('/summary', async (req, res) => {
       }
     }
 
-    // Ensure the document contains real, readable text rather than empty or scanned image markers
-    const cleanText = (content || '')
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    // Helper to check if text contains readable academic content
+    const hasReadableContent = (txt) => {
+      if (!txt) return false;
+      const clean = txt
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, ' ')
+        .replace(/---\s*Page\s+\d+\s*---/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return clean.split(/\s+/).filter(w => w.length > 1).length >= 5;
+    };
 
-    const words = cleanText.split(/\s+/).filter(w => w.length > 1);
-
-    if (!cleanText || words.length < 5) {
+    if (!hasReadableContent(content)) {
       return res.status(400).json({
         success: false,
-        error: 'This document contains no selectable text (scanned or image-only PDF). OCR (Optical Character Recognition) is required to extract text from scanned pages before generating an AI summary or quiz. Please upload a text-based study note.'
+        error: 'This document contains no readable text. If this is a scanned document, ensure the scan is clear, oriented properly, and has readable English text.'
       });
     }
 
@@ -126,19 +129,22 @@ router.post('/quiz', async (req, res) => {
       }
     }
 
-    // Ensure the document contains real, readable text rather than empty or scanned image markers
-    const cleanText = (content || '')
-      .replace(/<[^>]*>/g, ' ')
-      .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    // Helper to check if text contains readable academic content
+    const hasReadableContent = (txt) => {
+      if (!txt) return false;
+      const clean = txt
+        .replace(/<[^>]*>/g, ' ')
+        .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, ' ')
+        .replace(/---\s*Page\s+\d+\s*---/gi, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return clean.split(/\s+/).filter(w => w.length > 1).length >= 5;
+    };
 
-    const words = cleanText.split(/\s+/).filter(w => w.length > 1);
-
-    if (!cleanText || words.length < 5) {
+    if (!hasReadableContent(content)) {
       return res.status(400).json({
         success: false,
-        error: 'This document contains no selectable text (scanned or image-only PDF). OCR (Optical Character Recognition) is required to extract text from scanned pages before generating an AI summary or quiz. Please upload a text-based study note.'
+        error: 'This document contains no readable text. If this is a scanned document, ensure the scan is clear, oriented properly, and has readable English text.'
       });
     }
 

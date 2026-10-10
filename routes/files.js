@@ -130,6 +130,10 @@ router.post('/upload', (req, res) => {
 
       // 4. Create corresponding Note entry so it automatically appears in My Notes
       const ext = req.file.originalname.split('.').pop().toUpperCase();
+      const isOcr = extractedText.includes('--- Page ');
+      const noteTopic = isOcr ? `Scanned ${ext} (OCR Processed)` : `Uploaded ${ext} Document`;
+      const noteTags = isOcr ? `${ext}, OCR, Scanned Document` : `${ext}, Uploaded File`;
+
       const safeHtml = `<div class="uploaded-doc-content"><p>${extractedText
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
@@ -145,8 +149,8 @@ router.post('/upload', (req, res) => {
         fileId,
         req.file.originalname,
         subject,
-        `Uploaded ${ext} Document`,
-        `${ext}, Uploaded File`,
+        noteTopic,
+        noteTags,
         safeHtml
       );
       const noteId = noteInsert.lastInsertRowid;
@@ -164,9 +168,11 @@ router.post('/upload', (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: isS3
-          ? 'File uploaded to Amazon S3 and added to My Notes successfully.'
-          : 'File uploaded and added to My Notes successfully (saved locally - S3 not configured).',
+        message: isOcr
+          ? 'File uploaded and scanned pages recognized with OCR into My Notes.'
+          : (isS3
+            ? 'File uploaded to Amazon S3 and added to My Notes successfully.'
+            : 'File uploaded and added to My Notes successfully (saved locally - S3 not configured).'),
         file: {
           id: fileId,
           noteId: noteId,
@@ -174,7 +180,8 @@ router.post('/upload', (req, res) => {
           size: formatFileSize(req.file.size),
           subject: subject,
           s3Key: s3Key,
-          isS3: isS3
+          isS3: isS3,
+          isOcr: isOcr
         }
       });
     } catch (uploadErr) {

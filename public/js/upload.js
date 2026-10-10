@@ -188,40 +188,60 @@ async function uploadFileToBackend(file, subjectName) {
   const progressText = document.getElementById('uploadProgressText');
   const fileNameDisplay = document.getElementById('uploadFileNameDisplay');
 
+  const isPdf = file.name.toLowerCase().endsWith('.pdf');
+
   if (progressContainer) progressContainer.style.display = 'block';
   if (fileNameDisplay) fileNameDisplay.textContent = file.name;
-  if (progressBar) progressBar.style.width = '30%';
-  if (progressText) progressText.textContent = 'Extracting document text...';
+  if (progressBar) progressBar.style.width = '25%';
+  if (progressText) progressText.textContent = isPdf ? 'Analyzing PDF pages & text layer...' : 'Reading document content...';
+
+  // Incremental status update during processing
+  const progressTimer = setTimeout(() => {
+    if (progressBar) progressBar.style.width = '55%';
+    if (progressText) progressText.textContent = isPdf ? 'Recognizing text (running OCR for scanned pages)...' : 'Extracting text...';
+  }, 1200);
+
+  const finalTimer = setTimeout(() => {
+    if (progressBar) progressBar.style.width = '80%';
+    if (progressText) progressText.textContent = 'Formatting study note & saving...';
+  }, 3500);
 
   const formData = new FormData();
   formData.append('file', file);
   formData.append('subject', subjectName);
 
   try {
-    if (progressBar) progressBar.style.width = '70%';
-    if (progressText) progressText.textContent = 'Saving to storage & My Notes...';
-
     const res = await fetch('/api/files/upload', {
       method: 'POST',
       body: formData
     });
 
+    clearTimeout(progressTimer);
+    clearTimeout(finalTimer);
+
     const data = await res.json();
 
     if (progressBar) progressBar.style.width = '100%';
-    if (progressText) progressText.textContent = 'Done!';
+    if (progressText) progressText.textContent = 'Complete!';
 
     setTimeout(() => {
       if (progressContainer) progressContainer.style.display = 'none';
 
       if (res.ok && data.success) {
-        showToast(`"${file.name}" uploaded and added to My Notes!`, 'success');
+        const isOcr = data.file && data.file.isOcr;
+        if (isOcr) {
+          showToast(`"${file.name}" scanned pages converted via OCR & added to My Notes!`, 'success');
+        } else {
+          showToast(`"${file.name}" uploaded and added to My Notes!`, 'success');
+        }
         renderRecentUploadsTable();
       } else {
-        showToast(data.error || 'Upload failed.', 'danger');
+        showToast(data.error || 'Upload failed. Please check the document.', 'danger');
       }
     }, 400);
   } catch (err) {
+    clearTimeout(progressTimer);
+    clearTimeout(finalTimer);
     console.error('File upload error:', err);
     if (progressContainer) progressContainer.style.display = 'none';
     showToast('Failed to upload file. Check server connection.', 'danger');

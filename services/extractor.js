@@ -5,15 +5,18 @@
 
 const { PDFParse } = require('pdf-parse');
 const mammoth = require('mammoth');
+const ocrService = require('./ocr');
 
 /**
  * Extracts readable plain text from uploaded files (PDF, DOCX, TXT)
+ * Automatically falls back to OCR for scanned PDFs with no selectable text.
  * @param {Buffer} buffer - File buffer
  * @param {string} originalName - Original filename
  * @param {string} mimetype - MIME type
+ * @param {Object} options - Additional extraction options
  * @returns {Promise<string>} Extracted text
  */
-async function extractTextFromFile(buffer, originalName = '', mimetype = '') {
+async function extractTextFromFile(buffer, originalName = '', mimetype = '', options = {}) {
   if (!buffer || buffer.length === 0) {
     throw new Error('The uploaded file is empty (0 bytes).');
   }
@@ -31,6 +34,7 @@ async function extractTextFromFile(buffer, originalName = '', mimetype = '') {
 
   // 2. PDF (.pdf)
   if (name.endsWith('.pdf') || mimetype === 'application/pdf') {
+    // Attempt fast direct text extraction first
     try {
       const parser = new PDFParse({ data: buffer });
       const result = await parser.getText();
@@ -44,26 +48,29 @@ async function extractTextFromFile(buffer, originalName = '', mimetype = '') {
 
       const words = meaningfulText.split(/\s+/).filter(w => w.length > 1);
 
-      // If there are no real words or only page delimiter artifacts, it's a scanned/image-only PDF
-      if (!meaningfulText || words.length < 5) {
-        throw new Error(
-          'This PDF contains scanned images or photos with no selectable text. OCR (Optical Character Recognition) is required to extract text from scanned documents. Please upload a text-based PDF, DOCX, or TXT file.'
-        );
+      // Fast path: Text-based PDF has sufficient selectable text (skip OCR)
+      if (meaningfulText && words.length >= 5) {
+        const cleaned = rawText
+          .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '\n\n')
+          .replace(/\r\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+        return cleaned;
       }
+    } catch (parseErr) {
+      console.warn(`[Extractor] Direct text parse unhandled: ${parseErr.message}. Attempting OCR fallback.`);
+    }
 
-      // Format extracted text: replace page delimiters with clean breaks and normalize spacing
-      const cleaned = rawText
-        .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '\n\n')
-        .replace(/\r\n/g, '\n')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-
-      return cleaned;
-    } catch (pdfErr) {
-      if (pdfErr.message && (pdfErr.message.includes('scanned') || pdfErr.message.includes('OCR'))) {
-        throw pdfErr;
-      }
-      throw new Error(`Failed to extract text from PDF: ${pdfErr.message}`);
+    // Scanned or image-only PDF: Automatically invoke OCR
+    console.log(`[Extractor] PDF "${originalName}" has no selectable text. Initiating OCR extraction...`);
+    try {
+      const ocrResult = await ocrService.extractTextFromScannedPDF(buffer, {
+        filename: originalName,
+        ...options
+      });
+      return ocrResult.text;
+    } catch (ocrErr) {
+      throw new Error(`Failed to extract text from PDF: ${ocrErr.message}`);
     }
   }
 

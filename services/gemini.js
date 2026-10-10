@@ -159,6 +159,7 @@ async function generateNoteSummary(title, content) {
   const cleanContent = (content || '').replace(/<[^>]*>/g, ' ').substring(0, 35000);
   const prompt = `You are an academic study assistant for engineering college students.
 Summarize the following study note into clear, concise, structured revision materials.
+(Note: If the document was extracted via OCR from scanned textbook pages or handouts, ignore OCR noise/page markers and summarize the substantive academic concepts.)
 
 Note Title: ${title || 'Study Note'}
 Note Content:
@@ -184,7 +185,7 @@ You must return a valid JSON object with EXACTLY the following structure (do not
   ],
   "keywords": ["Keyword1", "Keyword2", "Keyword3", "Keyword4", "Keyword5"]
 }
-Only summarize information contained in the provided note. Keep language simple and academic.`;
+Only summarize information contained in the provided note. Do not invent or fabricate outside facts. Keep language simple and academic.`;
 
   let lastError = null;
 
@@ -233,6 +234,7 @@ async function generateQuizQuestions(title, content) {
   const cleanContent = (content || '').replace(/<[^>]*>/g, ' ').substring(0, 35000);
   const prompt = `You are an academic exam coordinator for college students.
 Generate a 5-question multiple choice revision quiz based solely on this study note.
+(Note: If the document was extracted via OCR from scanned materials, base all questions strictly on the actual factual content extracted from the document.)
 
 Note Title: ${title || 'Study Note'}
 Note Content:
@@ -247,7 +249,8 @@ Return a valid JSON array of EXACTLY 5 questions (no markdown ticks \`\`\`json, 
     "correctAnswer": 0,
     "explanation": "Detailed explanation of why this answer is correct."
   }
-]`;
+]
+Do not fabricate facts or questions outside the provided study note content.`;
 
   let lastError = null;
 

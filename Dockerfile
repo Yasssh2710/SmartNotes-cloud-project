@@ -6,11 +6,18 @@ FROM node:22-bookworm-slim
 # Set working directory inside container
 WORKDIR /app
 
-# Install build tools needed to compile native C++ addons (better-sqlite3)
+# Install build tools and OCR system dependencies:
+# - python3, make, g++: for compiling native C++ addons (better-sqlite3)
+# - tesseract-ocr, tesseract-ocr-eng, tesseract-ocr-osd: native OCR engine with English & orientation detection
+# - poppler-utils: pdftoppm / pdfinfo for ultra-fast, low-memory PDF-to-image conversion
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     make \
     g++ \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-osd \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy package descriptors

@@ -10,6 +10,7 @@ WORKDIR /app
 # - python3, make, g++: for compiling native C++ addons (better-sqlite3)
 # - tesseract-ocr, tesseract-ocr-eng, tesseract-ocr-osd: native OCR engine with English & orientation detection
 # - poppler-utils: pdftoppm / pdfinfo for ultra-fast, low-memory PDF-to-image conversion
+# - debianutils: provides which command and Linux utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     make \
@@ -18,7 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-eng \
     tesseract-ocr-osd \
     poppler-utils \
+    debianutils \
     && rm -rf /var/lib/apt/lists/*
+
+# Ensure tessdata directory paths are fully compatible across Debian versions
+RUN mkdir -p /usr/share/tessdata && \
+    ln -sf /usr/share/tesseract-ocr/5/tessdata/* /usr/share/tessdata/ 2>/dev/null || true
 
 # Copy package descriptors
 COPY package*.json ./
@@ -35,6 +41,7 @@ RUN mkdir -p database uploads
 # Set environment variables
 ENV NODE_ENV=production
 ENV PORT=3000
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
 
 # Expose default application port
 EXPOSE 3000

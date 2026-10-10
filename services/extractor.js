@@ -34,11 +34,14 @@ async function extractTextFromFile(buffer, originalName = '', mimetype = '', opt
 
   // 2. PDF (.pdf)
   if (name.endsWith('.pdf') || mimetype === 'application/pdf') {
+    let directText = '';
+    let directWords = [];
+
     // Attempt fast direct text extraction first
     try {
       const parser = new PDFParse({ data: buffer });
       const result = await parser.getText();
-      let rawText = (result && result.text) ? result.text : '';
+      const rawText = (result && result.text) ? result.text : '';
 
       // Strip pdf-parse page delimiter markers like "-- 1 of 22 --"
       const meaningfulText = rawText
@@ -46,10 +49,10 @@ async function extractTextFromFile(buffer, originalName = '', mimetype = '', opt
         .replace(/\s+/g, ' ')
         .trim();
 
-      const words = meaningfulText.split(/\s+/).filter(w => w.length > 1);
+      directWords = meaningfulText.split(/\s+/).filter(w => w.length > 1);
 
-      // Fast path: Text-based PDF has sufficient selectable text (skip OCR)
-      if (meaningfulText && words.length >= 5) {
+      // Fast path: Text-based PDF has substantial selectable text (25+ words) -> skip OCR
+      if (meaningfulText && directWords.length >= 25) {
         const cleaned = rawText
           .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '\n\n')
           .replace(/\r\n/g, '\n')
@@ -57,21 +60,47 @@ async function extractTextFromFile(buffer, originalName = '', mimetype = '', opt
           .trim();
         return cleaned;
       }
+
+      if (meaningfulText && directWords.length >= 5) {
+        directText = rawText
+          .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '\n\n')
+          .replace(/\r\n/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      }
     } catch (parseErr) {
       console.warn(`[Extractor] Direct text parse unhandled: ${parseErr.message}. Attempting OCR fallback.`);
     }
 
-    // Scanned or image-only PDF: Automatically invoke OCR
-    console.log(`[Extractor] PDF "${originalName}" has no selectable text. Initiating OCR extraction...`);
+    // Scanned or low-text PDF: Automatically invoke OCR to capture scanned content
+    console.log(
+      `[Extractor] PDF "${originalName}" has ${directWords.length} selectable words. Initiating OCR extraction...`
+    );
+
     try {
       const ocrResult = await ocrService.extractTextFromScannedPDF(buffer, {
         filename: originalName,
         ...options
       });
-      return ocrResult.text;
+
+      // If OCR succeeded and extracted text, return it
+      if (ocrResult && ocrResult.text && ocrResult.text.trim()) {
+        return ocrResult.text;
+      }
     } catch (ocrErr) {
+      // If OCR failed but direct extraction had at least 5 words, fall back to direct text
+      if (directText && directWords.length >= 5) {
+        console.warn(`[Extractor] OCR fallback failed (${ocrErr.message}), using partial direct text.`);
+        return directText;
+      }
       throw new Error(`Failed to extract text from PDF: ${ocrErr.message}`);
     }
+
+    if (directText && directWords.length >= 5) {
+      return directText;
+    }
+
+    throw new Error('This PDF contains no readable text. Ensure the file is not blank or corrupted.');
   }
 
   // 3. Word Document (.docx / .doc)

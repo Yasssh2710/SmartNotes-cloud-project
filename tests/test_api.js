@@ -349,6 +349,35 @@ async function main() {
     }
   });
 
+  await runTest('OCR: Environment detects working OCR engine without missing commands', async () => {
+    const env = await ocrService.detectOCREnvironment();
+    assert(
+      env.hasNative || env.hasTesseractJs,
+      'Must detect either native Tesseract CLI (Docker) or Tesseract.js (Universal)'
+    );
+  });
+
+  await runTest('OCR: In-memory PDF screenshot engine renders valid image buffers', async () => {
+    const scannedPdfBuf = buildSyntheticScannedPdf();
+    const { PDFParse } = require('pdf-parse');
+    const parser = new PDFParse({ data: scannedPdfBuf });
+    const screenshots = await parser.getScreenshot({ imageBuffer: true });
+    assert(screenshots && screenshots.pages && screenshots.pages.length > 0, 'Must produce page screenshots');
+    assert(screenshots.pages[0].data && screenshots.pages[0].data.length > 0, 'Page screenshot must have image data');
+  });
+
+  await runTest('OCR: Real Tesseract engine executes recognition on image buffer', async () => {
+    const scannedPdfBuf = buildSyntheticScannedPdf();
+    const { PDFParse } = require('pdf-parse');
+    const parser = new PDFParse({ data: scannedPdfBuf });
+    const screenshots = await parser.getScreenshot({ imageBuffer: true });
+    const pageBuffer = Buffer.from(screenshots.pages[0].data);
+
+    const Tesseract = require('tesseract.js');
+    const result = await Tesseract.recognize(pageBuffer, 'eng');
+    assert(typeof result.data.text === 'string', 'Tesseract recognition must return text string');
+  });
+
   // =========================================================================
   // 6. ERROR HANDLING & RESOURCE LIMIT TESTS
   // =========================================================================

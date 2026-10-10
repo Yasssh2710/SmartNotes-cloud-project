@@ -1,8 +1,8 @@
 /**
  * SmartNotes - Optical Character Recognition (OCR) Service (services/ocr.js)
- * Converts scanned/image-only PDFs into readable academic text using
- * system-native Tesseract OCR and Poppler utilities (pdftoppm).
- * Designed for Docker/Linux deployments on Render with memory & page limits.
+ * Robust dual-engine OCR service designed for Docker Linux (Render) and local environments:
+ *  - Primary Engine (Docker / Linux): Native C++ Tesseract & Poppler (pdftoppm) for high speed & low RAM.
+ *  - Secondary Engine (Universal Fallback): pdf-parse in-memory rendering & Tesseract.js.
  */
 
 const fs = require('fs');
@@ -10,6 +10,7 @@ const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
 const util = require('util');
+const { PDFParse } = require('pdf-parse');
 
 const execFilePromise = util.promisify(execFile);
 
@@ -18,68 +19,166 @@ const OCR_CONFIG = {
   maxFileSize: 10 * 1024 * 1024, // 10 MB maximum
   maxOcrPages: 15,               // Max pages to OCR to prevent timeout & memory exhaustion
   dpi: 150,                     // 150 DPI is optimal for OCR accuracy vs RAM/disk usage
-  pageTimeoutMs: 25000,         // 25s per page OCR timeout
+  pageTimeoutMs: 30000,         // 30s per page OCR timeout
   convertTimeoutMs: 45000,      // 45s PDF-to-image conversion timeout
   minWordsRequired: 5,          // Minimum meaningful words to consider extraction successful
   language: 'eng'               // Default Tesseract language
 };
 
-// Test hook for mock/simulation in environments without native binaries
+// Test hook for mock/simulation in testing environments
 let mockOCRHandler = null;
 
-/**
- * Checks if a specific CLI executable is available on the system PATH
- * @param {string} command - Command name (e.g. 'tesseract', 'pdftoppm')
- * @returns {Promise<boolean>}
- */
-async function isCommandAvailable(command) {
-  try {
-    const isWindows = process.platform === 'win32';
-    const checkCmd = isWindows ? 'where' : 'which';
-    await execFilePromise(checkCmd, [command]);
-    return true;
-  } catch (_) {
-    return false;
+// Ensure standard Debian / Linux tessdata paths are known
+if (process.platform === 'linux' && !process.env.TESSDATA_PREFIX) {
+  const debianTessdataPath = '/usr/share/tesseract-ocr/5/tessdata';
+  const genericTessdataPath = '/usr/share/tessdata';
+  if (fs.existsSync(debianTessdataPath)) {
+    process.env.TESSDATA_PREFIX = debianTessdataPath;
+  } else if (fs.existsSync(genericTessdataPath)) {
+    process.env.TESSDATA_PREFIX = genericTessdataPath;
   }
 }
 
 /**
- * Checks if native OCR tools (Tesseract and pdftoppm) are available
- * @returns {Promise<{ available: boolean, tesseract: boolean, pdftoppm: boolean }>}
+ * Searches for binary executable in standard system locations without relying on external 'which' command
+ * @param {string} name - Binary name ('tesseract', 'pdftoppm', 'pdfinfo')
+ * @returns {string} Resolved binary path or command name
  */
-async function checkOCREnvironment() {
-  if (mockOCRHandler) {
-    return { available: true, tesseract: true, pdftoppm: true };
+function findSystemBinary(name) {
+  // Check known Linux / container locations
+  const linuxCandidates = [
+    `/usr/bin/${name}`,
+    `/usr/local/bin/${name}`,
+    `/bin/${name}`,
+    `/usr/sbin/${name}`
+  ];
+
+  for (const candidate of linuxCandidates) {
+    if (fs.existsSync(candidate)) {
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return candidate;
+      } catch (_) {}
+    }
   }
-  const [hasTesseract, hasPdftoppm] = await Promise.all([
-    isCommandAvailable('tesseract'),
-    isCommandAvailable('pdftoppm')
+
+  // Check known Windows locations if running on win32
+  if (process.platform === 'win32') {
+    const winCandidates = [
+      `C:\\Program Files\\Tesseract-OCR\\${name}.exe`,
+      `C:\\Program Files (x86)\\Tesseract-OCR\\${name}.exe`,
+      path.join(process.env.LOCALAPPDATA || '', `Programs\\Tesseract-OCR\\${name}.exe`),
+      path.join(process.env.ProgramFiles || '', `poppler\\bin\\${name}.exe`)
+    ];
+    for (const candidate of winCandidates) {
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+
+  // Check PATH entries
+  const pathDirs = (process.env.PATH || '').split(path.delimiter);
+  const extensions = process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : [''];
+  for (const dir of pathDirs) {
+    for (const ext of extensions) {
+      const fullPath = path.join(dir, name + ext);
+      if (fs.existsSync(fullPath)) {
+        return fullPath;
+      }
+    }
+  }
+
+  return name;
+}
+
+/**
+ * Tests if a binary is genuinely executable and returns working path or null
+ * @param {string} name
+ * @param {string[]} args
+ * @returns {Promise<string|null>}
+ */
+async function testBinary(name, args = ['--version']) {
+  const resolved = findSystemBinary(name);
+  try {
+    await execFilePromise(resolved, args, { timeout: 8000 });
+    return resolved;
+  } catch (_) {
+    // If testing resolved path failed, test bare command name
+    if (resolved !== name) {
+      try {
+        await execFilePromise(name, args, { timeout: 8000 });
+        return name;
+      } catch (_) {}
+    }
+    return null;
+  }
+}
+
+/**
+ * Detects the available OCR engines in the current runtime
+ * @returns {Promise<{ hasNative: boolean, tesseractPath: string|null, pdftoppmPath: string|null, hasTesseractJs: boolean }>}
+ */
+async function detectOCREnvironment() {
+  if (mockOCRHandler) {
+    return {
+      hasNative: true,
+      tesseractPath: 'mock-tesseract',
+      pdftoppmPath: 'mock-pdftoppm',
+      hasTesseractJs: true
+    };
+  }
+
+  const [tesseractPath, pdftoppmPath] = await Promise.all([
+    testBinary('tesseract', ['--version']),
+    testBinary('pdftoppm', ['-v'])
   ]);
+
+  let hasTesseractJs = false;
+  try {
+    const tesseractJs = require('tesseract.js');
+    if (tesseractJs && typeof tesseractJs.recognize === 'function') {
+      hasTesseractJs = true;
+    }
+  } catch (_) {}
+
   return {
-    available: hasTesseract && hasPdftoppm,
-    tesseract: hasTesseract,
-    pdftoppm: hasPdftoppm
+    hasNative: !!(tesseractPath && pdftoppmPath),
+    tesseractPath,
+    pdftoppmPath,
+    hasTesseractJs
   };
 }
 
 /**
- * Retrieves the total number of pages in a PDF using pdfinfo or regex heuristic
+ * Retrieves total page count of a PDF using pdfinfo, pdf-parse, or buffer regex
  * @param {string} pdfPath
+ * @param {Buffer} pdfBuffer
  * @returns {Promise<number>}
  */
-async function getPdfPageCount(pdfPath) {
+async function getPdfPageCount(pdfPath, pdfBuffer) {
+  // 1. Try pdfinfo if available
+  const pdfinfoPath = findSystemBinary('pdfinfo');
   try {
-    const { stdout } = await execFilePromise('pdfinfo', [pdfPath], { timeout: 10000 });
+    const { stdout } = await execFilePromise(pdfinfoPath, [pdfPath], { timeout: 8000 });
     const match = stdout.match(/Pages:\s+(\d+)/i);
     if (match && match[1]) {
       return parseInt(match[1], 10);
     }
-  } catch (_) {
-    // pdfinfo not available or failed; fallback to inspecting buffer
+  } catch (_) {}
+
+  // 2. Try pdf-parse document metadata
+  if (pdfBuffer) {
+    try {
+      const parser = new PDFParse({ data: pdfBuffer });
+      const info = await parser.getInfo();
+      if (info && info.numPages) {
+        return info.numPages;
+      }
+    } catch (_) {}
   }
 
+  // 3. Regex heuristic on PDF buffer
   try {
-    const buffer = fs.readFileSync(pdfPath);
+    const buffer = pdfBuffer || fs.readFileSync(pdfPath);
     const content = buffer.toString('latin1');
     const pageMatches = content.match(/\/Type\s*\/Page[^s]/g);
     if (pageMatches && pageMatches.length > 0) {
@@ -87,17 +186,18 @@ async function getPdfPageCount(pdfPath) {
     }
   } catch (_) {}
 
-  return 1; // Default fallback
+  return 1;
 }
 
 /**
- * Converts a PDF into PNG image files using pdftoppm
- * @param {string} pdfPath - Path to source PDF
- * @param {string} outputDir - Directory to write PNG images
- * @param {number} maxPages - Maximum pages to convert
- * @returns {Promise<string[]>} Array of image file paths sorted by page number
+ * Converts PDF pages to PNG image files using pdftoppm
+ * @param {string} pdftoppmPath
+ * @param {string} pdfPath
+ * @param {string} outputDir
+ * @param {number} maxPages
+ * @returns {Promise<string[]>}
  */
-async function convertPdfToImages(pdfPath, outputDir, maxPages = OCR_CONFIG.maxOcrPages) {
+async function convertPdfToImagesNative(pdftoppmPath, pdfPath, outputDir, maxPages) {
   const prefix = path.join(outputDir, 'page');
   const args = [
     '-png',
@@ -108,15 +208,14 @@ async function convertPdfToImages(pdfPath, outputDir, maxPages = OCR_CONFIG.maxO
     prefix
   ];
 
-  await execFilePromise('pdftoppm', args, {
+  await execFilePromise(pdftoppmPath, args, {
     timeout: OCR_CONFIG.convertTimeoutMs,
-    maxBuffer: 10 * 1024 * 1024
+    maxBuffer: 15 * 1024 * 1024
   });
 
   const files = fs.readdirSync(outputDir)
     .filter(f => f.startsWith('page') && f.endsWith('.png'))
     .sort((a, b) => {
-      // Natural sort by page number extracted from filename (e.g. page-1.png vs page-10.png)
       const numA = parseInt((a.match(/\d+/) || [0])[0], 10);
       const numB = parseInt((b.match(/\d+/) || [0])[0], 10);
       return numA - numB;
@@ -124,64 +223,98 @@ async function convertPdfToImages(pdfPath, outputDir, maxPages = OCR_CONFIG.maxO
     .map(f => path.join(outputDir, f));
 
   if (files.length === 0) {
-    throw new Error('PDF-to-image conversion generated 0 image pages. The file may be corrupt.');
+    throw new Error('Native pdftoppm generated 0 image pages.');
   }
 
   return files;
 }
 
 /**
- * Runs Tesseract OCR on a single image file
- * Supports orientation detection (PSM 1) with fallback to standard segmentation (PSM 3)
- * @param {string} imagePath
- * @returns {Promise<string>} Extracted plain text
+ * Converts PDF pages to PNG buffers using pdf-parse getScreenshot
+ * @param {Buffer} pdfBuffer
+ * @param {number} maxPages
+ * @returns {Promise<Buffer[]>}
  */
-async function ocrImageFile(imagePath) {
-  // First attempt: PSM 1 (Automatic page segmentation with OSD - handles rotated pages)
+async function convertPdfToImagesJs(pdfBuffer, maxPages) {
+  const parser = new PDFParse({ data: pdfBuffer });
+  const screenshots = await parser.getScreenshot({ imageBuffer: true });
+
+  if (!screenshots || !screenshots.pages || screenshots.pages.length === 0) {
+    throw new Error('In-memory PDF page renderer produced 0 page screenshots.');
+  }
+
+  const buffers = [];
+  const count = Math.min(screenshots.pages.length, maxPages);
+  for (let i = 0; i < count; i++) {
+    const page = screenshots.pages[i];
+    if (page && page.data) {
+      buffers.push(Buffer.from(page.data));
+    }
+  }
+
+  return buffers;
+}
+
+/**
+ * Runs OCR on an image file using native Tesseract CLI
+ * @param {string} tesseractPath
+ * @param {string} imagePath
+ * @returns {Promise<string>}
+ */
+async function ocrImageNative(tesseractPath, imagePath) {
+  const baseArgs = [imagePath, 'stdout', '-l', OCR_CONFIG.language, '--oem', '1'];
+
+  // Add tessdata-dir flag if TESSDATA_PREFIX is configured
+  if (process.env.TESSDATA_PREFIX && fs.existsSync(process.env.TESSDATA_PREFIX)) {
+    baseArgs.push('--tessdata-dir', process.env.TESSDATA_PREFIX);
+  }
+
+  // Attempt 1: PSM 1 (Automatic page segmentation with Orientation & Script Detection)
   try {
-    const { stdout } = await execFilePromise('tesseract', [
-      imagePath,
-      'stdout',
-      '-l', OCR_CONFIG.language,
-      '--oem', '1',
+    const { stdout } = await execFilePromise(tesseractPath, [
+      ...baseArgs,
       '--psm', '1'
     ], {
       timeout: OCR_CONFIG.pageTimeoutMs,
       maxBuffer: 5 * 1024 * 1024
     });
-
     const text = (stdout || '').trim();
-    if (text.length > 0) {
-      return text;
-    }
-  } catch (osdErr) {
-    // If PSM 1 fails (e.g. OSD missing or orientation indeterminate), fall back to PSM 3
+    if (text.length > 0) return text;
+  } catch (_) {
+    // If PSM 1 fails (e.g. OSD module missing or orientation indeterminate), fall back to PSM 3
   }
 
-  // Second attempt: PSM 3 (Fully automatic page segmentation without OSD)
+  // Attempt 2: PSM 3 (Fully automatic page segmentation)
   try {
-    const { stdout } = await execFilePromise('tesseract', [
-      imagePath,
-      'stdout',
-      '-l', OCR_CONFIG.language,
-      '--oem', '1',
+    const { stdout } = await execFilePromise(tesseractPath, [
+      ...baseArgs,
       '--psm', '3'
     ], {
       timeout: OCR_CONFIG.pageTimeoutMs,
       maxBuffer: 5 * 1024 * 1024
     });
-
     return (stdout || '').trim();
   } catch (err) {
-    throw new Error(`Tesseract OCR failed on image: ${err.message}`);
+    throw new Error(`Native Tesseract OCR failed on page: ${err.message}`);
   }
 }
 
 /**
- * Extracts readable text from a scanned PDF buffer using OCR
- * @param {Buffer} pdfBuffer - Raw PDF file buffer
+ * Runs OCR on an image buffer using Tesseract.js
+ * @param {Buffer} imageBuffer
+ * @returns {Promise<string>}
+ */
+async function ocrImageJs(imageBuffer) {
+  const Tesseract = require('tesseract.js');
+  const result = await Tesseract.recognize(imageBuffer, OCR_CONFIG.language);
+  return (result && result.data && result.data.text) ? result.data.text.trim() : '';
+}
+
+/**
+ * Main entry point: extracts text from a scanned PDF buffer using OCR
+ * @param {Buffer} pdfBuffer - File buffer
  * @param {Object} options - Custom options (filename, maxPages)
- * @returns {Promise<{ text: string, pagesProcessed: number, totalPages: number, isOcr: boolean }>}
+ * @returns {Promise<{ text: string, pagesProcessed: number, totalPages: number, isOcr: boolean, engine: string }>}
  */
 async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
   if (!pdfBuffer || pdfBuffer.length === 0) {
@@ -197,18 +330,13 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
     return await mockOCRHandler(pdfBuffer, options);
   }
 
-  // Verify system binaries exist in the host environment
-  const env = await checkOCREnvironment();
-  if (!env.available) {
-    const missing = [];
-    if (!env.tesseract) missing.push('tesseract-ocr');
-    if (!env.pdftoppm) missing.push('poppler-utils (pdftoppm)');
+  const env = await detectOCREnvironment();
+  if (!env.hasNative && !env.hasTesseractJs) {
     throw new Error(
-      `This PDF contains scanned images with no selectable text. OCR requires system packages [${missing.join(', ')}]. These are installed in the Docker deployment on Render.`
+      'OCR processing is unavailable on this server because neither native Tesseract nor Tesseract.js is installed.'
     );
   }
 
-  // Create isolated temp workspace
   const tempDir = path.join(
     os.tmpdir(),
     `smartnotes-ocr-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
@@ -219,32 +347,69 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
   fs.writeFileSync(inputPdfPath, pdfBuffer);
 
   try {
-    const totalPages = await getPdfPageCount(inputPdfPath);
-    const pagesToProcess = Math.min(totalPages, options.maxPages || OCR_CONFIG.maxOcrPages);
+    const totalPages = await getPdfPageCount(inputPdfPath, pdfBuffer);
+    const maxPages = options.maxPages || OCR_CONFIG.maxOcrPages;
+    const pagesToProcess = Math.min(totalPages, maxPages);
 
-    console.log(
-      `[OCR] Processing scanned PDF "${options.filename || 'document.pdf'}" (${totalPages} total pages, converting first ${pagesToProcess} pages at ${OCR_CONFIG.dpi} DPI)...`
-    );
-
-    const imageFiles = await convertPdfToImages(inputPdfPath, tempDir, pagesToProcess);
     const pageTexts = [];
+    let engineUsed = 'native';
 
-    for (let i = 0; i < imageFiles.length; i++) {
-      const pageNum = i + 1;
-      const imgPath = imageFiles[i];
+    // 1. Try Native Engine (Docker / Render)
+    if (env.hasNative) {
       try {
-        const rawPageText = await ocrImageFile(imgPath);
-        const cleanedText = rawPageText
-          .replace(/\f/g, '')
-          .replace(/\r\n/g, '\n')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
+        console.log(
+          `[OCR] Running native engine on "${options.filename || 'document.pdf'}" (${totalPages} total pages, processing ${pagesToProcess})...`
+        );
+        const imageFiles = await convertPdfToImagesNative(env.pdftoppmPath, inputPdfPath, tempDir, pagesToProcess);
 
-        if (cleanedText) {
-          pageTexts.push(`--- Page ${pageNum} ---\n${cleanedText}`);
+        for (let i = 0; i < imageFiles.length; i++) {
+          const pageNum = i + 1;
+          const imgPath = imageFiles[i];
+          try {
+            const rawText = await ocrImageNative(env.tesseractPath, imgPath);
+            const cleaned = rawText
+              .replace(/\f/g, '')
+              .replace(/\r\n/g, '\n')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+
+            if (cleaned) {
+              pageTexts.push(`--- Page ${pageNum} ---\n${cleaned}`);
+            }
+          } catch (pageErr) {
+            console.warn(`[OCR] Native page ${pageNum} warning:`, pageErr.message);
+          }
         }
-      } catch (pageErr) {
-        console.warn(`[OCR] Warning: Failed to process page ${pageNum}:`, pageErr.message);
+      } catch (nativeErr) {
+        console.warn(`[OCR] Native engine encountered error: ${nativeErr.message}. Falling back to Tesseract.js.`);
+        pageTexts.length = 0; // Reset for fallback
+      }
+    }
+
+    // 2. Fallback to Tesseract.js if native produced no pages or is unavailable
+    if (pageTexts.length === 0 && env.hasTesseractJs) {
+      engineUsed = 'tesseract.js';
+      console.log(
+        `[OCR] Running Tesseract.js engine on "${options.filename || 'document.pdf'}" (${totalPages} pages, processing ${pagesToProcess})...`
+      );
+
+      const imageBuffers = await convertPdfToImagesJs(pdfBuffer, pagesToProcess);
+      for (let i = 0; i < imageBuffers.length; i++) {
+        const pageNum = i + 1;
+        try {
+          const rawText = await ocrImageJs(imageBuffers[i]);
+          const cleaned = rawText
+            .replace(/\f/g, '')
+            .replace(/\r\n/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+
+          if (cleaned) {
+            pageTexts.push(`--- Page ${pageNum} ---\n${cleaned}`);
+          }
+        } catch (jsErr) {
+          console.warn(`[OCR] Tesseract.js page ${pageNum} warning:`, jsErr.message);
+        }
       }
     }
 
@@ -260,7 +425,7 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
 
     if (!fullText || words.length < OCR_CONFIG.minWordsRequired) {
       throw new Error(
-        'OCR completed, but no readable text could be recognized. The scanned document might be blank, severely blurred, or unsupported. Please ensure the scan is clear.'
+        'OCR completed, but no readable text could be recognized. The scanned document might be blank, severely blurred, or unsupported. Please ensure the scan contains clear English text.'
       );
     }
 
@@ -268,16 +433,17 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
       fullText += `\n\n[Note: Document contains ${totalPages} pages. The first ${pagesToProcess} pages were processed with OCR to stay within server resource limits.]`;
     }
 
-    console.log(`[OCR] Successfully extracted ${words.length} words across ${pageTexts.length} pages.`);
+    console.log(`[OCR] Extraction succeeded via ${engineUsed} (${words.length} words across ${pageTexts.length} pages).`);
 
     return {
       text: fullText,
       pagesProcessed: pageTexts.length,
       totalPages: totalPages,
-      isOcr: true
+      isOcr: true,
+      engine: engineUsed
     };
   } finally {
-    // Guaranteed cleanup of all temp images and PDFs
+    // Guaranteed disk cleanup
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
     } catch (_) {}
@@ -294,8 +460,9 @@ function setMockOCRHandler(handler) {
 
 module.exports = {
   extractTextFromScannedPDF,
-  checkOCREnvironment,
-  isCommandAvailable,
+  detectOCREnvironment,
+  findSystemBinary,
+  testBinary,
   getPdfPageCount,
   setMockOCRHandler,
   OCR_CONFIG

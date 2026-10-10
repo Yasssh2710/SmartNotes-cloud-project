@@ -532,6 +532,90 @@ async function main() {
     }
   });
 
+  await runTest('Extractor: inspectPdfText correctly distinguishes text-based PDF from scanned PDF', async () => {
+    const { inspectPdfText } = require('../services/extractor');
+    const textPdfBuf = buildSyntheticTextPdf('Distributed Systems Consensus and Replication algorithms');
+    const textInspection = await inspectPdfText(textPdfBuf);
+    assert.strictEqual(textInspection.isText, true, 'Text-based PDF must be detected as isText: true');
+    assert(textInspection.wordCount >= 5, 'Word count must be at least 5');
+
+    const scannedPdfBuf = buildSyntheticScannedPdf();
+    const scannedInspection = await inspectPdfText(scannedPdfBuf);
+    assert.strictEqual(scannedInspection.isText, false, 'Scanned PDF must be detected as isText: false');
+  });
+
+  await runTest('Status & Workflow: Processing status transitions from processing to ready with note linking', async () => {
+    // 1. Insert file in processing state
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status, status_message, is_ocr)
+      VALUES (?, ?, ?, ?, ?, ?, 'processing', 'Analyzing scanned pages...', 1)
+    `).run(1, 'async_test.pdf', 'db:test-async.pdf', 'application/pdf', 1024, 'Cloud Computing');
+    const fileId = insert.lastInsertRowid;
+
+    // Verify initial status
+    const initialRow = db.prepare('SELECT status, status_message FROM files WHERE id = ?').get(fileId);
+    assert.strictEqual(initialRow.status, 'processing');
+    assert.strictEqual(initialRow.status_message, 'Analyzing scanned pages...');
+
+    // 2. Simulate background worker finishing and linking note
+    const noteInsert = db.prepare(`
+      INSERT INTO notes (user_id, file_id, title, subject, topic, tags, content)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(1, fileId, 'async_test.pdf', 'Cloud Computing', 'Scanned PDF (OCR Processed)', 'PDF, OCR', '<p>Extracted OCR content</p>');
+    const noteId = noteInsert.lastInsertRowid;
+
+    db.prepare(`
+      UPDATE files
+      SET note_id = ?, extracted_text = ?, status = 'ready', status_message = 'OCR processing completed successfully.'
+      WHERE id = ?
+    `).run(noteId, 'Extracted OCR content', fileId);
+
+    // Verify updated status
+    const finalRow = db.prepare('SELECT status, note_id, status_message FROM files WHERE id = ?').get(fileId);
+    assert.strictEqual(finalRow.status, 'ready');
+    assert.strictEqual(finalRow.note_id, noteId);
+  });
+
+  await runTest('Status & Workflow: Failure handling updates file status to failed with actionable message', async () => {
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status, status_message, is_ocr)
+      VALUES (?, ?, ?, ?, ?, ?, 'processing', 'Analyzing scanned pages...', 1)
+    `).run(1, 'failed_test.pdf', 'db:test-failed.pdf', 'application/pdf', 2048, 'Cloud Computing');
+    const fileId = insert.lastInsertRowid;
+
+    const errorMsg = 'OCR completed, but no readable text could be recognized.';
+    db.prepare('UPDATE files SET status = ?, status_message = ? WHERE id = ?').run('failed', errorMsg, fileId);
+
+    const row = db.prepare('SELECT status, status_message FROM files WHERE id = ?').get(fileId);
+    assert.strictEqual(row.status, 'failed');
+    assert.strictEqual(row.status_message, errorMsg);
+  });
+
+  await runTest('Database: Prevent duplicate note creation on re-processing file', async () => {
+    // Check existing note for a file
+    const fileInsert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'ready')
+    `).run(1, 'dedup_test.pdf', 'db:dedup.pdf', 'application/pdf', 512, 'Cloud Computing');
+    const fileId = fileInsert.lastInsertRowid;
+
+    // Create initial note
+    const note1 = db.prepare(`
+      INSERT INTO notes (user_id, file_id, title, subject, topic, tags, content)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(1, fileId, 'dedup_test.pdf', 'Cloud Computing', 'Uploaded PDF', 'PDF', '<p>Initial</p>');
+    const note1Id = note1.lastInsertRowid;
+
+    // Deduplication check: if existing note exists for this file_id, update it instead of inserting another
+    const existing = db.prepare('SELECT id FROM notes WHERE file_id = ?').get(fileId);
+    assert(existing, 'Must find existing note');
+    assert.strictEqual(existing.id, note1Id);
+
+    db.prepare('UPDATE notes SET content = ? WHERE id = ?').run('<p>Updated Content</p>', existing.id);
+    const count = db.prepare('SELECT COUNT(*) as cnt FROM notes WHERE file_id = ?').get(fileId);
+    assert.strictEqual(count.cnt, 1, 'There must be exactly 1 note per file_id');
+  });
+
   // =========================================================================
   // 8. AI & GEMINI INTEGRATION TESTS
   // =========================================================================

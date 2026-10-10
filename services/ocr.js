@@ -18,10 +18,10 @@ const execFilePromise = util.promisify(execFile);
 const OCR_CONFIG = {
   maxFileSize: 25 * 1024 * 1024, // 25 MB maximum
   maxOcrPages: 4,                // Max pages to OCR to prevent timeout & memory exhaustion on Render
-  dpi: 150,                     // 150 DPI is optimal for OCR accuracy vs RAM/disk usage
-  pageTimeoutMs: 15000,         // 15s per page OCR timeout
-  convertTimeoutMs: 30000,      // 30s PDF-to-image conversion timeout
-  totalOcrTimeoutMs: 50000,     // 50s total OCR safeguard timeout
+  dpi: 130,                     // 130 DPI with grayscale is optimal: fast rendering, low RAM, high OCR accuracy
+  pageTimeoutMs: 25000,         // 25s per page OCR timeout
+  convertTimeoutMs: 35000,      // 35s PDF-to-image conversion timeout
+  totalOcrTimeoutMs: 90000,     // 90s total OCR safeguard timeout for background jobs
   minWordsRequired: 3,          // Minimum meaningful words to consider extraction successful
   language: 'eng'               // Default Tesseract language
 };
@@ -215,6 +215,7 @@ async function convertPdfToImagesNative(pdftoppmPath, pdfPath, outputDir, maxPag
   const prefix = path.join(outputDir, 'page');
   const args = [
     '-png',
+    '-gray', // 8-bit grayscale rasterization: saves 66% RAM and accelerates rendering
     '-r', String(OCR_CONFIG.dpi),
     '-f', '1',
     '-l', String(maxPages),
@@ -305,9 +306,20 @@ async function ocrImageNative(tesseractPath, imagePath) {
     });
     const text = (stdout || '').trim();
     if (text.length > 0) return text;
-  } catch (_) {
-    // If PSM 3 fails, fall back to PSM 1
-  }
+  } catch (_) {}
+
+  // Fast secondary attempt: PSM 6 (Single uniform block of text - very fast for documents/slides)
+  try {
+    const { stdout } = await execFilePromise(tesseractPath, [
+      ...baseArgs,
+      '--psm', '6'
+    ], {
+      timeout: OCR_CONFIG.pageTimeoutMs,
+      maxBuffer: 5 * 1024 * 1024
+    });
+    const text = (stdout || '').trim();
+    if (text.length > 0) return text;
+  } catch (_) {}
 
   // Fallback attempt: PSM 1 (Automatic with OSD)
   try {
@@ -348,7 +360,7 @@ async function ocrImageJs(imageBuffer) {
 /**
  * Main entry point: extracts text from a scanned PDF buffer using OCR
  * @param {Buffer} pdfBuffer - File buffer
- * @param {Object} options - Custom options (filename, maxPages)
+ * @param {Object} options - Custom options (filename, maxPages, onProgress)
  * @returns {Promise<{ text: string, pagesProcessed: number, totalPages: number, isOcr: boolean, engine: string }>}
  */
 async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
@@ -389,6 +401,12 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
     const pageTexts = [];
     let engineUsed = 'native';
 
+    if (typeof options.onProgress === 'function') {
+      try {
+        await options.onProgress(0, pagesToProcess, `Preparing ${pagesToProcess} scanned page${pagesToProcess > 1 ? 's' : ''} for OCR...`);
+      } catch (_) {}
+    }
+
     // 1. Try Native Engine (Docker / Render)
     if (env.hasNative) {
       try {
@@ -400,6 +418,13 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
         for (let i = 0; i < imageFiles.length; i++) {
           const pageNum = i + 1;
           const imgPath = imageFiles[i];
+
+          if (typeof options.onProgress === 'function') {
+            try {
+              await options.onProgress(pageNum, pagesToProcess, `Extracting text with OCR (page ${pageNum} of ${pagesToProcess})...`);
+            } catch (_) {}
+          }
+
           try {
             const rawText = await ocrImageNative(env.tesseractPath, imgPath);
             const cleaned = rawText
@@ -431,6 +456,13 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
       const imageBuffers = await convertPdfToImagesJs(pdfBuffer, pagesToProcess);
       for (let i = 0; i < imageBuffers.length; i++) {
         const pageNum = i + 1;
+
+        if (typeof options.onProgress === 'function') {
+          try {
+            await options.onProgress(pageNum, pagesToProcess, `Extracting text with OCR (page ${pageNum} of ${pagesToProcess})...`);
+          } catch (_) {}
+        }
+
         try {
           const rawText = await ocrImageJs(imageBuffers[i]);
           const cleaned = rawText

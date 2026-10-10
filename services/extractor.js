@@ -131,6 +131,55 @@ async function extractTextFromFile(buffer, originalName = '', mimetype = '', opt
   throw new Error('Unsupported file format. Please upload a PDF, DOCX, or TXT file.');
 }
 
+/**
+ * Inspects a PDF buffer to quickly detect if it contains selectable text without invoking OCR.
+ * @param {Buffer} buffer - PDF buffer
+ * @returns {Promise<{ isText: boolean, text: string, wordCount: number }>}
+ */
+async function inspectPdfText(buffer) {
+  if (!buffer || buffer.length === 0) {
+    return { isText: false, text: '', wordCount: 0 };
+  }
+
+  let parser = null;
+  try {
+    parser = new PDFParse({ data: buffer });
+    const parsePromise = parser.getText();
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('PDF direct text inspection timed out (10s)')), 10000)
+    );
+
+    const result = await Promise.race([parsePromise, timeoutPromise]);
+    const rawText = (result && result.text) ? result.text : '';
+
+    const meaningfulText = rawText
+      .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const directWords = meaningfulText.split(/\s+/).filter(w => w.length > 1);
+
+    if (meaningfulText && directWords.length >= 5) {
+      const cleaned = rawText
+        .replace(/--\s*\d+\s+of\s+\d+\s*--/gi, '\n\n')
+        .replace(/\r\n/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+      return { isText: true, text: cleaned, wordCount: directWords.length };
+    }
+
+    return { isText: false, text: meaningfulText, wordCount: directWords.length };
+  } catch (err) {
+    return { isText: false, text: '', wordCount: 0, error: err.message };
+  } finally {
+    if (parser && typeof parser.destroy === 'function') {
+      try { await parser.destroy(); } catch (_) {}
+    }
+  }
+}
+
 module.exports = {
-  extractTextFromFile
+  extractTextFromFile,
+  inspectPdfText
 };
+

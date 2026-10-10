@@ -9,7 +9,7 @@ const router = express.Router();
 const multer = require('multer');
 const db = require('../database/db');
 const s3Service = require('../services/s3.js');
-const { extractTextFromFile } = require('../services/extractor');
+const { extractTextFromFile, inspectPdfText } = require('../services/extractor');
 
 // Configure Multer in memory with 25 MB limit
 const upload = multer({
@@ -43,6 +43,82 @@ function sanitizeLog(text) {
 }
 
 /**
+ * Asynchronous background worker for OCR on scanned PDFs
+ * Detached from HTTP request to prevent server/proxy timeouts
+ */
+async function processScannedPdfBackground(fileId, pdfBuffer, originalName, subject, userId) {
+  const ocrService = require('../services/ocr');
+  try {
+    const ocrResult = await ocrService.extractTextFromScannedPDF(pdfBuffer, {
+      filename: originalName,
+      onProgress: async (current, total, msg) => {
+        try {
+          db.prepare('UPDATE files SET status_message = ? WHERE id = ?').run(msg, fileId);
+        } catch (_) {}
+      }
+    });
+
+    const extractedText = (ocrResult && ocrResult.text) ? ocrResult.text.trim() : '';
+    if (!extractedText) {
+      throw new Error('OCR completed, but no readable text could be recognized.');
+    }
+
+    const ext = (originalName.split('.').pop() || 'PDF').toUpperCase();
+    const noteTopic = `Scanned ${ext} (OCR Processed)`;
+    const noteTags = `${ext}, OCR, Scanned Document`;
+
+    const safeHtml = `<div class="uploaded-doc-content"><p>${extractedText
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/\n\n+/g, '</p><p>')
+      .replace(/\n/g, '<br>')}</p></div>`;
+
+    // Prevent duplicate notes for this file_id
+    const existingNote = db.prepare('SELECT id FROM notes WHERE file_id = ?').get(fileId);
+    let noteId;
+    if (existingNote) {
+      db.prepare('UPDATE notes SET content = ?, topic = ?, tags = ? WHERE id = ?')
+        .run(safeHtml, noteTopic, noteTags, existingNote.id);
+      noteId = existingNote.id;
+    } else {
+      const noteInsert = db.prepare(`
+        INSERT INTO notes (user_id, file_id, title, subject, topic, tags, content)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        userId,
+        fileId,
+        originalName,
+        subject,
+        noteTopic,
+        noteTags,
+        safeHtml
+      );
+      noteId = noteInsert.lastInsertRowid;
+    }
+
+    // Update files record to ready
+    db.prepare(`
+      UPDATE files
+      SET note_id = ?, extracted_text = ?, status = 'ready', status_message = 'OCR processing completed successfully.'
+      WHERE id = ?
+    `).run(noteId, extractedText, fileId);
+
+    console.log(`[OCR Background] Successfully processed "${originalName}": fileId=${fileId}, noteId=${noteId}`);
+  } catch (err) {
+    console.error(`[OCR Background] Failed for fileId=${fileId}:`, sanitizeLog(err.message));
+    const userMessage = err.message || 'OCR processing failed. Document may be unreadable or blurry.';
+    try {
+      db.prepare(`
+        UPDATE files
+        SET status = 'failed', status_message = ?
+        WHERE id = ?
+      `).run(userMessage, fileId);
+    } catch (_) {}
+  }
+}
+
+/**
  * GET /api/files
  * Lists uploaded files for current student
  */
@@ -51,6 +127,7 @@ router.get('/', (req, res) => {
     const userId = getUserId(req);
     const files = db.prepare(`
       SELECT f.id, f.note_id, f.original_filename, f.file_size, f.file_type, f.s3_key, f.uploaded_at,
+             f.status, f.status_message, f.is_ocr,
              COALESCE(f.subject, n.subject, 'General') as subject,
              n.title as note_title
       FROM files f
@@ -61,7 +138,13 @@ router.get('/', (req, res) => {
 
     const formatted = files.map(file => {
       const isS3 = !file.s3_key.startsWith('db:') && !file.s3_key.startsWith('local:');
-      const status = isS3 ? 'Uploaded (S3)' : 'Uploaded (Database)';
+      let status = isS3 ? 'Uploaded (S3)' : 'Uploaded (Database)';
+      if (file.status === 'processing') {
+        status = 'Processing (OCR)';
+      } else if (file.status === 'failed') {
+        status = 'Failed';
+      }
+
       return {
         id: file.id,
         noteId: file.note_id,
@@ -71,7 +154,10 @@ router.get('/', (req, res) => {
         subject: file.subject || 'General',
         date: file.uploaded_at ? file.uploaded_at.split(' ')[0] : new Date().toISOString().split('T')[0],
         status: status,
+        statusState: file.status || 'ready',
+        statusMessage: file.status_message || '',
         isS3: isS3,
+        isOcr: !!file.is_ocr,
         storageType: isS3 ? 's3' : 'database'
       };
     });
@@ -85,6 +171,38 @@ router.get('/', (req, res) => {
   } catch (err) {
     console.error('[Files] Listing error:', sanitizeLog(err.message));
     return res.status(500).json({ success: false, error: 'Failed to retrieve uploaded files.' });
+  }
+});
+
+/**
+ * GET /api/files/:id/status
+ * Returns processing status of an uploaded file
+ */
+router.get('/:id/status', (req, res) => {
+  try {
+    const fileId = req.params.id;
+    const file = db.prepare(`
+      SELECT id, user_id, note_id, original_filename, status, status_message, is_ocr
+      FROM files
+      WHERE id = ?
+    `).get(fileId);
+
+    if (!file) {
+      return res.status(404).json({ success: false, error: 'File not found.' });
+    }
+
+    return res.json({
+      success: true,
+      fileId: file.id,
+      noteId: file.note_id,
+      status: file.status || 'ready',
+      message: file.status_message || '',
+      isOcr: !!file.is_ocr,
+      filename: file.original_filename
+    });
+  } catch (err) {
+    console.error('[Files] Status check error:', sanitizeLog(err.message));
+    return res.status(500).json({ success: false, error: 'Failed to retrieve file status.' });
   }
 });
 
@@ -133,27 +251,94 @@ router.post('/upload', (req, res) => {
 
       console.log(`[Files] Upload received: "${req.file.originalname}" (${formatFileSize(req.file.size)}, MIME: ${req.file.mimetype || 'unknown'}) for subject: "${subject}"`);
 
-      // 1. Extract plain text from PDF, DOCX, or TXT
-      let extractedText = '';
-      try {
-        extractedText = await extractTextFromFile(req.file.buffer, req.file.originalname, req.file.mimetype);
-      } catch (extErr) {
+      // 1. Upload to S3 or Database persistent storage fallback
+      const { s3Key, isS3, storageType } = await s3Service.uploadFileToStorage(req.file, userId);
+
+      const ext = req.file.originalname.split('.').pop().toLowerCase();
+      let isScannedPdf = false;
+      let directExtractedText = '';
+
+      if (ext === 'pdf') {
+        const inspection = await inspectPdfText(req.file.buffer);
+        if (inspection.isText) {
+          directExtractedText = inspection.text;
+        } else {
+          isScannedPdf = true;
+        }
+      } else {
+        // Plain text (.txt) or Word document (.docx)
+        try {
+          directExtractedText = await extractTextFromFile(req.file.buffer, req.file.originalname, req.file.mimetype);
+        } catch (extErr) {
+          clearTimeout(timeoutTimer);
+          isResponded = true;
+          console.error('[Files] Text extraction failed:', sanitizeLog(extErr.message));
+          return res.status(400).json({
+            success: false,
+            error: `Could not read document text: ${extErr.message}`
+          });
+        }
+      }
+
+      // 2. If it is a scanned PDF, register file with 'processing' status and launch async OCR
+      if (isScannedPdf) {
+        const fileInsert = db.prepare(`
+          INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text, file_data, status, status_message, is_ocr)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'processing', 'File received. Preparing scanned pages for OCR...', 1)
+        `).run(
+          userId,
+          req.file.originalname,
+          s3Key,
+          req.file.mimetype || 'application/pdf',
+          req.file.size,
+          subject,
+          '',
+          isS3 ? null : req.file.buffer
+        );
+        const fileId = fileInsert.lastInsertRowid;
+
+        // Ensure subject is cataloged in subjects table
+        try {
+          db.prepare(`
+            INSERT OR IGNORE INTO subjects (user_id, name, description, semester)
+            VALUES (?, ?, ?, ?)
+          `).run(userId, subject, `Study materials for ${subject}.`, 'Elective');
+        } catch (_) {}
+
         clearTimeout(timeoutTimer);
         isResponded = true;
-        console.error('[Files] Text extraction failed:', sanitizeLog(extErr.message));
-        return res.status(400).json({
-          success: false,
-          error: `Could not read document text: ${extErr.message}`
+
+        console.log(`[Files] Scanned PDF registered (fileId=${fileId}). Dispatched asynchronous OCR job for "${req.file.originalname}".`);
+
+        // Launch background OCR processing (detached from HTTP request)
+        setImmediate(() => {
+          processScannedPdfBackground(fileId, req.file.buffer, req.file.originalname, subject, userId);
+        });
+
+        return res.status(201).json({
+          success: true,
+          status: 'processing',
+          fileId: fileId,
+          message: 'File uploaded successfully. Optical character recognition (OCR) is processing in background.',
+          file: {
+            id: fileId,
+            noteId: null,
+            name: req.file.originalname,
+            size: formatFileSize(req.file.size),
+            subject: subject,
+            s3Key: s3Key,
+            isS3: isS3,
+            isOcr: true,
+            status: 'processing',
+            storageType: storageType || (isS3 ? 's3' : 'database')
+          }
         });
       }
 
-      // 2. Upload to S3 or Database persistent storage fallback
-      const { s3Key, isS3, storageType } = await s3Service.uploadFileToStorage(req.file, userId);
-
-      // 3. Save to files table (including file_data BLOB for persistent storage on Render)
+      // 3. For text-based files (PDF with selectable text, DOCX, TXT): finish synchronously
       const fileInsert = db.prepare(`
-        INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text, file_data)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, extracted_text, file_data, status, status_message, is_ocr)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ready', 'Extracted directly.', 0)
       `).run(
         userId,
         req.file.originalname,
@@ -161,18 +346,17 @@ router.post('/upload', (req, res) => {
         req.file.mimetype || 'application/octet-stream',
         req.file.size,
         subject,
-        extractedText,
-        isS3 ? null : req.file.buffer // Store in SQLite BLOB when S3 is not used!
+        directExtractedText,
+        isS3 ? null : req.file.buffer
       );
       const fileId = fileInsert.lastInsertRowid;
 
-      // 4. Create corresponding Note entry so it automatically appears in My Notes
-      const ext = req.file.originalname.split('.').pop().toUpperCase();
-      const isOcr = extractedText.includes('--- Page ');
-      const noteTopic = isOcr ? `Scanned ${ext} (OCR Processed)` : `Uploaded ${ext} Document`;
-      const noteTags = isOcr ? `${ext}, OCR, Scanned Document` : `${ext}, Uploaded File`;
+      // 4. Create corresponding Note entry in My Notes
+      const upperExt = ext.toUpperCase();
+      const noteTopic = `Uploaded ${upperExt} Document`;
+      const noteTags = `${upperExt}, Uploaded File`;
 
-      const safeHtml = `<div class="uploaded-doc-content"><p>${extractedText
+      const safeHtml = `<div class="uploaded-doc-content"><p>${directExtractedText
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -212,11 +396,10 @@ router.post('/upload', (req, res) => {
 
       return res.status(201).json({
         success: true,
-        message: isOcr
-          ? 'File uploaded and scanned pages recognized with OCR into My Notes.'
-          : (isS3
-            ? 'File uploaded to Amazon S3 and added to My Notes successfully.'
-            : 'File uploaded and added to My Notes successfully (saved in Database storage - S3 not configured).'),
+        status: 'ready',
+        message: isS3
+          ? 'File uploaded to Amazon S3 and added to My Notes successfully.'
+          : 'File uploaded and added to My Notes successfully (saved in Database storage - S3 not configured).',
         file: {
           id: fileId,
           noteId: noteId,
@@ -225,7 +408,8 @@ router.post('/upload', (req, res) => {
           subject: subject,
           s3Key: s3Key,
           isS3: isS3,
-          isOcr: isOcr,
+          isOcr: false,
+          status: 'ready',
           storageType: storageType || (isS3 ? 's3' : 'database')
         }
       });

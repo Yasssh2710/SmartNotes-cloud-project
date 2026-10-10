@@ -201,26 +201,10 @@ async function uploadFileToBackend(file, subjectName) {
   if (progressBar) progressBar.style.width = '20%';
   if (progressText) progressText.textContent = isPdf ? 'Analyzing PDF pages & text layer...' : 'Reading document content...';
 
-  // Incremental status update during processing
-  const t1 = setTimeout(() => {
-    if (progressBar) progressBar.style.width = '50%';
-    if (progressText) progressText.textContent = isPdf ? 'Extracting text (OCR for scanned pages)...' : 'Extracting text...';
-  }, 1200);
-
-  const t2 = setTimeout(() => {
-    if (progressBar) progressBar.style.width = '75%';
-    if (progressText) progressText.textContent = 'Formatting study note & saving to database...';
-  }, 3500);
-
-  const t3 = setTimeout(() => {
-    if (progressBar) progressBar.style.width = '90%';
-    if (progressText) progressText.textContent = 'Finalizing document registration...';
-  }, 10000);
-
   const controller = new AbortController();
   const abortTimeout = setTimeout(() => {
     controller.abort();
-  }, 75000); // 75-second client timeout safeguard
+  }, 45000); // 45-second HTTP upload safeguard
 
   const formData = new FormData();
   formData.append('file', file);
@@ -233,56 +217,136 @@ async function uploadFileToBackend(file, subjectName) {
       signal: controller.signal
     });
 
-    clearTimeout(t1);
-    clearTimeout(t2);
-    clearTimeout(t3);
     clearTimeout(abortTimeout);
 
     let data;
     try {
       data = await res.json();
     } catch (_) {
-      throw new Error(`Server returned error status ${res.status} (${res.statusText || 'Unexpected response'}).`);
+      throw new Error(`Server returned status ${res.status} (${res.statusText || 'Unexpected response'}).`);
     }
 
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || 'Upload failed.');
+    }
+
+    // Check if the file is processing asynchronously (e.g. scanned PDF running OCR)
+    if (data.status === 'processing') {
+      if (progressBar) progressBar.style.width = '35%';
+      if (progressText) progressText.textContent = data.message || 'Extracting scanned pages with OCR...';
+      renderRecentUploadsTable(); // Show in table immediately with "Processing" status
+      pollFileStatus(data.fileId || (data.file && data.file.id), file.name);
+      return;
+    }
+
+    // Text-based file or instant extraction completed
     if (progressBar) progressBar.style.width = '100%';
     if (progressText) progressText.textContent = 'Complete!';
 
     setTimeout(() => {
       if (progressContainer) progressContainer.style.display = 'none';
-
-      if (res.ok && data.success) {
-        const isOcr = data.file && data.file.isOcr;
-        if (isOcr) {
-          showToast(`"${file.name}" scanned pages converted via OCR & added to My Notes!`, 'success');
-        } else {
-          showToast(`"${file.name}" uploaded and added to My Notes!`, 'success');
-        }
-        renderRecentUploadsTable();
-      } else {
-        showToast(data.error || 'Upload failed. Please check the document.', 'danger');
+      showToast(`"${file.name}" uploaded and added to My Notes!`, 'success');
+      renderRecentUploadsTable();
+      if (fileInput) {
+        fileInput.disabled = false;
+        fileInput.value = '';
       }
+      if (browseBtn) browseBtn.disabled = false;
     }, 400);
+
   } catch (err) {
-    clearTimeout(t1);
-    clearTimeout(t2);
-    clearTimeout(t3);
     clearTimeout(abortTimeout);
     console.error('File upload error:', err);
     if (progressContainer) progressContainer.style.display = 'none';
 
     if (err.name === 'AbortError') {
-      showToast('Upload timed out. The file took too long to process on the server.', 'danger');
+      showToast('Upload connection timed out. Please try again.', 'danger');
     } else {
       showToast(err.message || 'Failed to upload file. Check server connection.', 'danger');
     }
-  } finally {
+
     if (fileInput) {
       fileInput.disabled = false;
-      fileInput.value = ''; // Reset input to allow re-uploading same file if desired
+      fileInput.value = '';
     }
     if (browseBtn) browseBtn.disabled = false;
   }
+}
+
+/**
+ * Polls status of asynchronously processed files (e.g. scanned PDFs)
+ */
+async function pollFileStatus(fileId, fileName) {
+  const progressContainer = document.getElementById('uploadProgressContainer');
+  const progressBar = document.getElementById('uploadProgressBar');
+  const progressText = document.getElementById('uploadProgressText');
+  const fileInput = document.getElementById('fileInput');
+  const browseBtn = document.getElementById('btnBrowseFiles');
+
+  let attempts = 0;
+  const maxAttempts = 60; // 60 * 2s = 120 seconds maximum polling safeguard
+  let pollPercent = 35;
+
+  const timer = setInterval(async () => {
+    attempts++;
+    try {
+      const res = await fetch(`/api/files/${fileId}/status`);
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        if (data.message && progressText) {
+          progressText.textContent = data.message;
+        }
+
+        if (data.status === 'processing') {
+          if (pollPercent < 85) {
+            pollPercent += 3;
+            if (progressBar) progressBar.style.width = `${pollPercent}%`;
+          }
+        } else if (data.status === 'ready') {
+          clearInterval(timer);
+          if (progressBar) progressBar.style.width = '100%';
+          if (progressText) progressText.textContent = 'OCR processing complete!';
+          setTimeout(() => {
+            if (progressContainer) progressContainer.style.display = 'none';
+            showToast(`"${fileName}" scanned pages recognized with OCR & added to My Notes!`, 'success');
+            renderRecentUploadsTable();
+            if (fileInput) {
+              fileInput.disabled = false;
+              fileInput.value = '';
+            }
+            if (browseBtn) browseBtn.disabled = false;
+          }, 600);
+          return;
+        } else if (data.status === 'failed') {
+          clearInterval(timer);
+          if (progressContainer) progressContainer.style.display = 'none';
+          showToast(data.message || 'OCR processing failed on this document.', 'danger');
+          renderRecentUploadsTable();
+          if (fileInput) {
+            fileInput.disabled = false;
+            fileInput.value = '';
+          }
+          if (browseBtn) browseBtn.disabled = false;
+          return;
+        }
+      }
+    } catch (pollErr) {
+      console.warn('Status poll warning:', pollErr);
+    }
+
+    if (attempts >= maxAttempts) {
+      clearInterval(timer);
+      if (progressContainer) progressContainer.style.display = 'none';
+      showToast('OCR processing is taking longer than usual. Please check Recent Uploads in a moment.', 'warning');
+      renderRecentUploadsTable();
+      if (fileInput) {
+        fileInput.disabled = false;
+        fileInput.value = '';
+      }
+      if (browseBtn) browseBtn.disabled = false;
+    }
+  }, 2000);
 }
 
 /**
@@ -313,9 +377,16 @@ async function renderRecentUploadsTable() {
       if (item.name.endsWith('.txt')) fileIcon = 'fa-file-lines text-secondary';
 
       const isS3 = item.isS3;
-      const statusBadge = isS3
-        ? `<span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-brands fa-aws me-1"></i> Amazon S3</span>`
-        : `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-solid fa-database me-1"></i> Database Storage</span>`;
+      let statusBadge;
+      if (item.statusState === 'processing') {
+        statusBadge = `<span class="badge bg-warning-subtle text-warning border border-warning-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-solid fa-spinner fa-spin me-1"></i> Processing (OCR)</span>`;
+      } else if (item.statusState === 'failed') {
+        statusBadge = `<span class="badge bg-danger-subtle text-danger border border-danger-subtle px-2 py-1" style="font-size: 0.75rem;" title="${escapeHtml(item.statusMessage || 'Processing failed')}"><i class="fa-solid fa-circle-exclamation me-1"></i> OCR Failed</span>`;
+      } else if (isS3) {
+        statusBadge = `<span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-brands fa-aws me-1"></i> Amazon S3</span>`;
+      } else {
+        statusBadge = `<span class="badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1" style="font-size: 0.75rem;"><i class="fa-solid fa-database me-1"></i> Database Storage</span>`;
+      }
 
       return `
         <tr>

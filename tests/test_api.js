@@ -376,6 +376,37 @@ async function main() {
     const Tesseract = require('tesseract.js');
     const result = await Tesseract.recognize(pageBuffer, 'eng');
     assert(typeof result.data.text === 'string', 'Tesseract recognition must return text string');
+
+    // Test ocrService.ocrImageJs directly with the resolved tessdata directory
+    const jsResult = await ocrService.ocrImageJs(pageBuffer);
+    assert(typeof jsResult === 'string', 'ocrImageJs must return a string using local traineddata');
+  });
+
+  await runTest('OCR: Resolves valid tessdata directory containing eng.traineddata', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const tessDir = ocrService.getTessdataDirectory();
+    assert(tessDir, 'Tessdata directory must be resolved');
+    const trainedDataPath = path.join(tessDir, 'eng.traineddata');
+    assert(fs.existsSync(trainedDataPath), `eng.traineddata must exist in resolved directory: ${tessDir}`);
+  });
+
+  await runTest('OCR: Normalizes TESSDATA_PREFIX to parent directory to prevent tessdata/tessdata collision', () => {
+    const originalPrefix = process.env.TESSDATA_PREFIX;
+    try {
+      const path = require('path');
+      const projectRoot = path.resolve(__dirname, '..');
+      // Simulate Render misconfiguration pointing directly to a tessdata folder
+      process.env.TESSDATA_PREFIX = path.join(projectRoot, 'tessdata');
+      ocrService.normalizeTessdataPrefix();
+      assert.strictEqual(
+        process.env.TESSDATA_PREFIX,
+        projectRoot,
+        'TESSDATA_PREFIX must normalize to parent directory when ending in tessdata'
+      );
+    } finally {
+      process.env.TESSDATA_PREFIX = originalPrefix;
+    }
   });
 
   // =========================================================================

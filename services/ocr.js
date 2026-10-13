@@ -29,15 +29,75 @@ const OCR_CONFIG = {
 // Test hook for mock/simulation in testing environments
 let mockOCRHandler = null;
 
-// Ensure standard Debian / Linux tessdata paths are known
-if (process.platform === 'linux' && !process.env.TESSDATA_PREFIX) {
-  const debianTessdataPath = '/usr/share/tesseract-ocr/5/tessdata';
-  const genericTessdataPath = '/usr/share/tessdata';
-  if (fs.existsSync(debianTessdataPath)) {
-    process.env.TESSDATA_PREFIX = debianTessdataPath;
-  } else if (fs.existsSync(genericTessdataPath)) {
-    process.env.TESSDATA_PREFIX = genericTessdataPath;
+// Ensure TESSDATA_PREFIX is configured correctly for native Tesseract CLI.
+// Tesseract CLI expects TESSDATA_PREFIX to point to the parent directory containing the 'tessdata' folder.
+// If TESSDATA_PREFIX ends with 'tessdata', Tesseract CLI appends 'tessdata' and fails looking for 'tessdata/tessdata'.
+function normalizeTessdataPrefix() {
+  if (process.env.TESSDATA_PREFIX) {
+    const normalized = process.env.TESSDATA_PREFIX.replace(/[/\\]+$/, '');
+    if (path.basename(normalized).toLowerCase() === 'tessdata') {
+      process.env.TESSDATA_PREFIX = path.dirname(normalized);
+    }
+  } else if (process.platform === 'linux') {
+    const debianParent = '/usr/share/tesseract-ocr/5';
+    const genericParent = '/usr/share';
+    if (fs.existsSync(path.join(debianParent, 'tessdata'))) {
+      process.env.TESSDATA_PREFIX = debianParent;
+    } else if (fs.existsSync(path.join(genericParent, 'tessdata'))) {
+      process.env.TESSDATA_PREFIX = genericParent;
+    }
   }
+}
+normalizeTessdataPrefix();
+
+/**
+ * Resolves the directory path that directly contains .traineddata files.
+ * Used for Tesseract CLI --tessdata-dir argument and Tesseract.js langPath.
+ * @returns {string|null} Directory containing language traineddata files
+ */
+function getTessdataDirectory() {
+  const langFile = `${OCR_CONFIG.language}.traineddata`;
+  const candidates = [];
+
+  // Check TESSDATA_PREFIX subfolder 'tessdata' first, then prefix directory directly
+  if (process.env.TESSDATA_PREFIX) {
+    candidates.push(path.join(process.env.TESSDATA_PREFIX, 'tessdata'));
+    candidates.push(process.env.TESSDATA_PREFIX);
+  }
+
+  // Debian / Linux standard system locations
+  candidates.push('/usr/share/tesseract-ocr/5/tessdata');
+  candidates.push('/usr/share/tessdata');
+  candidates.push('/usr/share/tesseract-ocr/4.00/tessdata');
+
+  // Project root (eng.traineddata is stored in the repository root)
+  const projectRoot = path.resolve(__dirname, '..');
+  candidates.push(projectRoot);
+
+  // Windows standard installation paths
+  if (process.platform === 'win32') {
+    candidates.push('C:\\Program Files\\Tesseract-OCR\\tessdata');
+    candidates.push('C:\\Program Files (x86)\\Tesseract-OCR\\tessdata');
+    if (process.env.LOCALAPPDATA) {
+      candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs\\Tesseract-OCR\\tessdata'));
+    }
+  }
+
+  // Return the first candidate that contains the language traineddata file
+  for (const dir of candidates) {
+    if (dir && fs.existsSync(path.join(dir, langFile))) {
+      return dir;
+    }
+  }
+
+  // Fallback to first existing candidate directory
+  for (const dir of candidates) {
+    if (dir && fs.existsSync(dir)) {
+      return dir;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -290,12 +350,14 @@ async function convertPdfToImagesJs(pdfBuffer, maxPages) {
 async function ocrImageNative(tesseractPath, imagePath) {
   const baseArgs = [imagePath, 'stdout', '-l', OCR_CONFIG.language, '--oem', '1'];
 
-  // Add tessdata-dir flag if TESSDATA_PREFIX is configured
-  if (process.env.TESSDATA_PREFIX && fs.existsSync(process.env.TESSDATA_PREFIX)) {
-    baseArgs.push('--tessdata-dir', process.env.TESSDATA_PREFIX);
+  // Add explicit tessdata directory flag if resolved
+  const tessdataDir = getTessdataDirectory();
+  if (tessdataDir) {
+    baseArgs.push('--tessdata-dir', tessdataDir);
   }
 
-  // Fast direct attempt: PSM 3 (Fully automatic page segmentation)
+  // Optimized single-pass OCR: PSM 3 (Fully automatic page segmentation)
+  // Covers multi-column, standard notes, documents, and slides in ~1s without multi-pass overhead.
   try {
     const { stdout } = await execFilePromise(tesseractPath, [
       ...baseArgs,
@@ -306,9 +368,12 @@ async function ocrImageNative(tesseractPath, imagePath) {
     });
     const text = (stdout || '').trim();
     if (text.length > 0) return text;
-  } catch (_) {}
+  } catch (err) {
+    // Fail-fast on process or configuration errors to avoid redundant timeouts
+    throw new Error(`Native Tesseract OCR failed on page: ${err.message}`);
+  }
 
-  // Fast secondary attempt: PSM 6 (Single uniform block of text - very fast for documents/slides)
+  // Fast single fallback for dense single uniform blocks if PSM 3 returned 0 text without throwing
   try {
     const { stdout } = await execFilePromise(tesseractPath, [
       ...baseArgs,
@@ -317,22 +382,9 @@ async function ocrImageNative(tesseractPath, imagePath) {
       timeout: OCR_CONFIG.pageTimeoutMs,
       maxBuffer: 5 * 1024 * 1024
     });
-    const text = (stdout || '').trim();
-    if (text.length > 0) return text;
-  } catch (_) {}
-
-  // Fallback attempt: PSM 1 (Automatic with OSD)
-  try {
-    const { stdout } = await execFilePromise(tesseractPath, [
-      ...baseArgs,
-      '--psm', '1'
-    ], {
-      timeout: OCR_CONFIG.pageTimeoutMs,
-      maxBuffer: 5 * 1024 * 1024
-    });
     return (stdout || '').trim();
-  } catch (err) {
-    throw new Error(`Native Tesseract OCR failed on page: ${err.message}`);
+  } catch (_) {
+    return '';
   }
 }
 
@@ -343,10 +395,8 @@ async function ocrImageNative(tesseractPath, imagePath) {
  */
 async function ocrImageJs(imageBuffer) {
   const Tesseract = require('tesseract.js');
-  const projectRoot = path.resolve(__dirname, '..');
-  const options = fs.existsSync(path.join(projectRoot, 'eng.traineddata'))
-    ? { langPath: projectRoot, gzip: false }
-    : (process.env.TESSDATA_PREFIX && fs.existsSync(process.env.TESSDATA_PREFIX) ? { langPath: process.env.TESSDATA_PREFIX, gzip: false } : {});
+  const tessdataDir = getTessdataDirectory();
+  const options = tessdataDir ? { langPath: tessdataDir, gzip: false } : {};
 
   const result = await Promise.race([
     Tesseract.recognize(imageBuffer, OCR_CONFIG.language, options),
@@ -438,6 +488,9 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
             }
           } catch (pageErr) {
             console.warn(`[OCR] Native page ${pageNum} warning:`, pageErr.message);
+            // If native Tesseract fails with execution error, rethrow to trigger fast fallback to Tesseract.js
+            // rather than failing every subsequent page and exhausting timeout
+            throw pageErr;
           }
         }
       } catch (nativeErr) {
@@ -541,6 +594,9 @@ module.exports = {
   testBinary,
   getPdfPageCount,
   ocrImageJs,
+  ocrImageNative,
+  getTessdataDirectory,
+  normalizeTessdataPrefix,
   setMockOCRHandler,
   OCR_CONFIG
 };

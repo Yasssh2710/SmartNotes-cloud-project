@@ -41,7 +41,7 @@ RUN mkdir -p database uploads
 # Set environment variables
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5/tessdata
+ENV TESSDATA_PREFIX=/usr/share/tesseract-ocr/5
 
 # Expose default application port
 EXPOSE 3000

@@ -12,6 +12,7 @@ const cors = require('cors');
 
 // Ensure database is initialized
 require('./database/db');
+const ocrQueue = require('./services/ocrQueue');
 
 // Import route modules
 const { router: authRouter } = require('./routes/auth');
@@ -23,6 +24,9 @@ const subjectsRouter = require('./routes/subjects');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0';
+
+// Recover any interrupted OCR jobs from previous server run
+ocrQueue.recoverInterruptedJobs();
 
 // Middlewares
 app.use(cors());

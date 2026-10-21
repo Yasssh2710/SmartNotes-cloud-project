@@ -244,6 +244,9 @@ async function renderNotesList() {
                       <a href="quiz.html?noteId=${note.id}" class="btn btn-sm btn-light-custom text-warning" title="Take AI Quiz">
                         <i class="fa-solid fa-circle-question"></i> Quiz
                       </a>
+                      <a href="ask.html?noteId=${note.id}" class="btn btn-sm btn-light-custom text-success" title="Ask My Notes">
+                        <i class="fa-solid fa-comments"></i> Ask AI
+                      </a>
                       <button type="button" class="note-btn-action action-delete" onclick="promptDeleteNote('${note.id}', '${escapeHtml(note.title)}')" title="Delete Note">
                         <i class="fa-regular fa-trash-can"></i>
                       </button>
@@ -297,6 +300,9 @@ async function renderNotesList() {
                   </a>
                   <a href="quiz.html?noteId=${note.id}" class="btn btn-sm btn-light-custom text-warning" title="AI Quiz">
                     <i class="fa-solid fa-circle-question"></i> Quiz
+                  </a>
+                  <a href="ask.html?noteId=${note.id}" class="btn btn-sm btn-light-custom text-success" title="Ask My Notes">
+                    <i class="fa-solid fa-comments"></i> Ask AI
                   </a>
                   <button type="button" class="btn btn-sm btn-light-custom text-danger" onclick="promptDeleteNote('${note.id}', '${escapeHtml(note.title)}')">
                     <i class="fa-regular fa-trash-can"></i>
@@ -647,6 +653,9 @@ async function initViewNotePage() {
               </a>
               <a href="quiz.html?noteId=${note.id}" class="btn btn-sm btn-outline-primary">
                 <i class="fa-solid fa-circle-question"></i> AI Quiz
+              </a>
+              <a href="ask.html?noteId=${note.id}" class="btn btn-sm btn-outline-success">
+                <i class="fa-solid fa-comments"></i> Ask Notes
               </a>
             </div>
           </div>

@@ -43,6 +43,8 @@ function getUserId(req) {
   return 1; // Demo user fallback
 }
 
+const ocrQueue = require('../services/ocrQueue');
+
 /**
  * Sanitizes log output to prevent secret leakage
  */
@@ -53,76 +55,25 @@ function sanitizeLog(text) {
 
 /**
  * Asynchronous background worker for OCR on scanned PDFs
- * Detached from HTTP request to prevent server/proxy timeouts
+ * Delegates to durable, restart-safe ocrQueue with page-level tracking in SQLite
  */
 async function processScannedPdfBackground(fileId, pdfBuffer, originalName, subject, userId) {
-  const ocrService = require('../services/ocr');
   try {
-    const ocrResult = await ocrService.extractTextFromScannedPDF(pdfBuffer, {
-      filename: originalName,
-      onProgress: async (current, total, msg) => {
-        try {
-          db.prepare('UPDATE files SET status_message = ? WHERE id = ?').run(msg, fileId);
-        } catch (_) {}
-      }
+    ocrQueue.enqueueJob({
+      fileId,
+      userId,
+      originalName,
+      subject,
+      pdfBuffer
     });
-
-    const extractedText = (ocrResult && ocrResult.text) ? ocrResult.text.trim() : '';
-    if (!extractedText) {
-      throw new Error('OCR completed, but no readable text could be recognized.');
-    }
-
-    const ext = (originalName.split('.').pop() || 'PDF').toUpperCase();
-    const noteTopic = `Scanned ${ext} (OCR Processed)`;
-    const noteTags = `${ext}, OCR, Scanned Document`;
-
-    const safeHtml = `<div class="uploaded-doc-content"><p>${extractedText
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/\n\n+/g, '</p><p>')
-      .replace(/\n/g, '<br>')}</p></div>`;
-
-    // Prevent duplicate notes for this file_id
-    const existingNote = db.prepare('SELECT id FROM notes WHERE file_id = ?').get(fileId);
-    let noteId;
-    if (existingNote) {
-      db.prepare('UPDATE notes SET content = ?, topic = ?, tags = ? WHERE id = ?')
-        .run(safeHtml, noteTopic, noteTags, existingNote.id);
-      noteId = existingNote.id;
-    } else {
-      const noteInsert = db.prepare(`
-        INSERT INTO notes (user_id, file_id, title, subject, topic, tags, content)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        userId,
-        fileId,
-        originalName,
-        subject,
-        noteTopic,
-        noteTags,
-        safeHtml
-      );
-      noteId = noteInsert.lastInsertRowid;
-    }
-
-    // Update files record to ready
-    db.prepare(`
-      UPDATE files
-      SET note_id = ?, extracted_text = ?, status = 'ready', status_message = 'OCR processing completed successfully.'
-      WHERE id = ?
-    `).run(noteId, extractedText, fileId);
-
-    console.log(`[OCR Background] Successfully processed "${originalName}": fileId=${fileId}, noteId=${noteId}`);
   } catch (err) {
-    console.error(`[OCR Background] Failed for fileId=${fileId}:`, sanitizeLog(err.message));
-    const userMessage = err.message || 'OCR processing failed. Document may be unreadable or blurry.';
+    console.error(`[OCR Background] Enqueue error for fileId=${fileId}:`, sanitizeLog(err.message));
     try {
       db.prepare(`
         UPDATE files
         SET status = 'failed', status_message = ?
         WHERE id = ?
-      `).run(userMessage, fileId);
+      `).run(err.message || 'Failed to queue OCR processing', fileId);
     } catch (_) {}
   }
 }
@@ -185,33 +136,49 @@ router.get('/', (req, res) => {
 
 /**
  * GET /api/files/:id/status
- * Returns processing status of an uploaded file
+ * Returns processing status of an uploaded file with page-level metrics
  */
 router.get('/:id/status', (req, res) => {
   try {
     const fileId = req.params.id;
-    const file = db.prepare(`
-      SELECT id, user_id, note_id, original_filename, status, status_message, is_ocr
-      FROM files
-      WHERE id = ?
-    `).get(fileId);
+    const statusData = ocrQueue.getJobStatus(fileId);
 
-    if (!file) {
+    if (!statusData) {
       return res.status(404).json({ success: false, error: 'File not found.' });
     }
 
     return res.json({
       success: true,
-      fileId: file.id,
-      noteId: file.note_id,
-      status: file.status || 'ready',
-      message: file.status_message || '',
-      isOcr: !!file.is_ocr,
-      filename: file.original_filename
+      fileId: statusData.fileId,
+      noteId: statusData.noteId,
+      status: statusData.status,
+      jobStatus: statusData.jobStatus,
+      message: statusData.message,
+      totalPages: statusData.totalPages,
+      processedPages: statusData.processedPages,
+      failedPages: statusData.failedPages,
+      isOcr: statusData.isOcr,
+      filename: statusData.filename
     });
   } catch (err) {
     console.error('[Files] Status check error:', sanitizeLog(err.message));
     return res.status(500).json({ success: false, error: 'Failed to retrieve file status.' });
+  }
+});
+
+/**
+ * POST /api/files/:id/retry-ocr
+ * Retries failed OCR pages without reprocessing already-successful pages
+ */
+router.post('/:id/retry-ocr', (req, res) => {
+  try {
+    const userId = getUserId(req);
+    const fileId = req.params.id;
+    const result = ocrQueue.retryFailedPages(fileId, userId);
+    return res.json(result);
+  } catch (err) {
+    console.error('[Files] Retry OCR error:', sanitizeLog(err.message));
+    return res.status(400).json({ success: false, error: err.message });
   }
 });
 

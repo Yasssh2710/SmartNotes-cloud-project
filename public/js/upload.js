@@ -415,7 +415,14 @@ async function renderRecentUploadsTable() {
                 <a href="quiz.html?noteId=${item.noteId}" class="btn btn-sm btn-light-custom text-warning" title="AI Quiz">
                   <i class="fa-solid fa-circle-question"></i>
                 </a>
-              ` : ''}
+                <a href="ask.html?fileId=${item.id}&noteId=${item.noteId}" class="btn btn-sm btn-light-custom text-success" title="Ask My Notes AI">
+                  <i class="fa-solid fa-comments"></i>
+                </a>
+              ` : (item.statusState === 'failed' ? `
+                <button type="button" class="btn btn-sm btn-outline-warning" title="Retry Failed OCR" onclick="retryFailedUpload('${item.id}')">
+                  <i class="fa-solid fa-arrows-rotate"></i> Retry
+                </button>
+              ` : '')}
               <a href="/api/files/${item.id}/download" class="btn btn-sm btn-light-custom" title="Download File">
                 <i class="fa-solid fa-download"></i>
               </a>
@@ -449,6 +456,23 @@ async function deleteUploadedFile(fileId) {
   } catch (err) {
     console.error('Delete file error:', err);
     showToast('Failed to delete file.', 'danger');
+  }
+}
+
+async function retryFailedUpload(fileId) {
+  try {
+    const res = await fetch(`/api/files/${fileId}/retry-ocr`, { method: 'POST' });
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(data.message || 'Retry initiated for failed pages.', 'info');
+      renderRecentUploadsTable();
+      pollFileStatus(fileId, 'Document');
+    } else {
+      showToast(data.error || 'Failed to retry OCR.', 'danger');
+    }
+  } catch (err) {
+    console.error('Retry OCR error:', err);
+    showToast('Failed to retry OCR.', 'danger');
   }
 }
 

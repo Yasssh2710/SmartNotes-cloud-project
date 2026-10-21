@@ -100,10 +100,48 @@ function initDatabase() {
     );
   `);
 
-  // 6. Schema Migrations (add columns if missing)
+  // 6. Create OCR_JOBS table for durable background processing
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS ocr_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_id INTEGER NOT NULL UNIQUE,
+      user_id INTEGER NOT NULL,
+      total_pages INTEGER DEFAULT 0,
+      processed_pages INTEGER DEFAULT 0,
+      current_page INTEGER DEFAULT 0,
+      batch_size INTEGER DEFAULT 3,
+      failed_pages TEXT DEFAULT '[]',
+      status TEXT DEFAULT 'queued',
+      status_message TEXT,
+      retry_count INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
+
+  // 7. Create FILE_PAGES table for per-page OCR and text caching
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS file_pages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_id INTEGER NOT NULL,
+      page_number INTEGER NOT NULL,
+      text_content TEXT,
+      is_ocr INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      error_message TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(file_id, page_number),
+      FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+    );
+  `);
+
+  // 8. Schema Migrations (add columns if missing)
   migrateSchema();
 
-  // 7. Seed default demo user and curriculum data if not exists
+  // 9. Seed default demo user and curriculum data if not exists
   seedDemoData();
 }
 
@@ -154,6 +192,47 @@ function migrateSchema() {
     // 3. Subjects table columns
     safeAddColumn('subjects', 'semester', 'TEXT');
     safeAddColumn('subjects', 'description', 'TEXT');
+
+    // 4. Ensure ocr_jobs and file_pages tables exist
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS ocr_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL UNIQUE,
+        user_id INTEGER NOT NULL,
+        total_pages INTEGER DEFAULT 0,
+        processed_pages INTEGER DEFAULT 0,
+        current_page INTEGER DEFAULT 0,
+        batch_size INTEGER DEFAULT 3,
+        failed_pages TEXT DEFAULT '[]',
+        status TEXT DEFAULT 'queued',
+        status_message TEXT,
+        retry_count INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      );
+    `);
+
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS file_pages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_id INTEGER NOT NULL,
+        page_number INTEGER NOT NULL,
+        text_content TEXT,
+        is_ocr INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'pending',
+        error_message TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(file_id, page_number),
+        FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+      );
+    `);
+
+    safeAddColumn('ocr_jobs', 'batch_size', 'INTEGER DEFAULT 3');
+    safeAddColumn('ocr_jobs', 'failed_pages', "TEXT DEFAULT '[]'");
+    safeAddColumn('ocr_jobs', 'retry_count', 'INTEGER DEFAULT 0');
   } catch (err) {
     console.warn('[DB Migration Warning]', err.message);
   }

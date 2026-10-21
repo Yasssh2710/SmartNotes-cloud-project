@@ -17,11 +17,12 @@ const execFilePromise = util.promisify(execFile);
 // Resource and processing safeguards for Render free tier (512MB RAM limit)
 const OCR_CONFIG = {
   maxFileSize: 25 * 1024 * 1024, // 25 MB maximum
-  maxOcrPages: 4,                // Max pages to OCR to prevent timeout & memory exhaustion on Render
-  dpi: 130,                     // 130 DPI with grayscale is optimal: fast rendering, low RAM, high OCR accuracy
-  pageTimeoutMs: 25000,         // 25s per page OCR timeout
-  convertTimeoutMs: 35000,      // 35s PDF-to-image conversion timeout
-  totalOcrTimeoutMs: 90000,     // 90s total OCR safeguard timeout for background jobs
+  batchSize: 3,                  // 3 pages per sequential batch (optimal for Render 512MB RAM)
+  maxOcrPages: 60,               // Default safety cap for synchronous direct caller (queue handles full docs)
+  dpi: 130,                     // 130 DPI with grayscale: fast rendering, low RAM, high OCR accuracy
+  pageTimeoutMs: 45000,         // 45s per page OCR timeout (safeguard for low/throttled CPU)
+  convertTimeoutMs: 45000,      // 45s PDF-to-image conversion timeout per batch
+  totalOcrTimeoutMs: 300000,    // 300s fallback safeguard for direct synchronous calls
   minWordsRequired: 3,          // Minimum meaningful words to consider extraction successful
   language: 'eng'               // Default Tesseract language
 };
@@ -408,9 +409,151 @@ async function ocrImageJs(imageBuffer) {
 }
 
 /**
- * Main entry point: extracts text from a scanned PDF buffer using OCR
+ * Processes a specific batch of page numbers from a PDF buffer using OCR.
+ * Tries native engine first (Poppler pdftoppm + Tesseract CLI),
+ * falls back to universal in-memory engine (pdf-parse + Tesseract.js) if native is unavailable.
+ * Cleans up all temporary disk artifacts immediately after processing the batch.
+ *
+ * @param {Buffer} pdfBuffer - Full PDF buffer
+ * @param {number[]} pageNumbers - Array of 1-based page numbers to OCR (e.g. [1, 2, 3])
+ * @param {Object} options - { filename }
+ * @returns {Promise<Array<{ pageNum: number, text: string, success: boolean, error: string|null }>>}
+ */
+async function processBatch(pdfBuffer, pageNumbers, options = {}) {
+  if (!pageNumbers || pageNumbers.length === 0) return [];
+
+  // Mock handler support for tests
+  if (mockOCRHandler) {
+    const mockRes = await mockOCRHandler(pdfBuffer, { ...options, pageNumbers });
+    if (mockRes && mockRes.text) {
+      return pageNumbers.map(p => ({
+        pageNum: p,
+        text: `Page ${p} content from OCR`,
+        success: true,
+        error: null
+      }));
+    }
+  }
+
+  const env = await detectOCREnvironment();
+  if (!env.hasNative && !env.hasTesseractJs) {
+    throw new Error('OCR is unavailable: neither native Tesseract CLI nor Tesseract.js is installed.');
+  }
+
+  const tempDir = path.join(
+    os.tmpdir(),
+    `smartnotes-batch-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
+  );
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const inputPdfPath = path.join(tempDir, 'batch_doc.pdf');
+  fs.writeFileSync(inputPdfPath, pdfBuffer);
+
+  const results = [];
+
+  try {
+    const minPage = Math.min(...pageNumbers);
+    const maxPage = Math.max(...pageNumbers);
+
+    // 1. Try Native Engine (Docker / Render)
+    let nativeSucceeded = false;
+    if (env.hasNative) {
+      try {
+        const prefix = path.join(tempDir, 'page');
+        const ppmArgs = [
+          '-png',
+          '-gray',
+          '-r', String(OCR_CONFIG.dpi),
+          '-f', String(minPage),
+          '-l', String(maxPage),
+          inputPdfPath,
+          prefix
+        ];
+
+        await execFilePromise(env.pdftoppmPath, ppmArgs, {
+          timeout: OCR_CONFIG.convertTimeoutMs,
+          maxBuffer: 20 * 1024 * 1024
+        });
+
+        const generatedFiles = fs.readdirSync(tempDir)
+          .filter(f => f.startsWith('page') && f.endsWith('.png'));
+
+        for (const pageNum of pageNumbers) {
+          const matched = generatedFiles.find(f => {
+            const m = f.match(/page-(\d+)\.png/i) || f.match(/(\d+)\.png/i);
+            return m && parseInt(m[1], 10) === pageNum;
+          });
+
+          if (matched) {
+            const imgPath = path.join(tempDir, matched);
+            try {
+              const text = await ocrImageNative(env.tesseractPath, imgPath);
+              results.push({ pageNum, text: text.trim(), success: true, error: null });
+            } catch (pageErr) {
+              console.warn(`[OCR Native] Page ${pageNum} OCR error:`, pageErr.message);
+              results.push({ pageNum, text: '', success: false, error: pageErr.message });
+            }
+          } else {
+            results.push({ pageNum, text: '', success: false, error: `pdftoppm did not produce image for page ${pageNum}` });
+          }
+        }
+
+        nativeSucceeded = results.some(r => r.success);
+      } catch (nativeErr) {
+        console.warn(`[OCR Batch] Native pdftoppm/tesseract batch failed (${nativeErr.message}). Falling back to Tesseract.js.`);
+        results.length = 0;
+      }
+    }
+
+    // 2. Fallback to in-memory rendering + Tesseract.js
+    if (!nativeSucceeded && env.hasTesseractJs) {
+      let parser = null;
+      try {
+        parser = new PDFParse({ data: pdfBuffer });
+        const screenshots = await parser.getScreenshot({
+          partial: pageNumbers,
+          imageBuffer: true,
+          imageDataUrl: false
+        });
+
+        const pages = (screenshots && screenshots.pages) ? screenshots.pages : [];
+
+        for (const pageNum of pageNumbers) {
+          const pageObj = pages.find(p => (p.pageNumber === pageNum) || (p.num === pageNum)) || pages[pageNumbers.indexOf(pageNum)];
+          if (pageObj && pageObj.data) {
+            try {
+              const buffer = Buffer.from(pageObj.data);
+              const text = await ocrImageJs(buffer);
+              results.push({ pageNum, text: text.trim(), success: true, error: null });
+            } catch (jsErr) {
+              console.warn(`[OCR JS] Page ${pageNum} OCR error:`, jsErr.message);
+              results.push({ pageNum, text: '', success: false, error: jsErr.message });
+            }
+          } else {
+            results.push({ pageNum, text: '', success: false, error: `Could not render screenshot for page ${pageNum}` });
+          }
+        }
+      } finally {
+        if (parser && typeof parser.destroy === 'function') {
+          try { await parser.destroy(); } catch (_) {}
+        }
+      }
+    }
+
+    return results;
+  } finally {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (_) {}
+  }
+}
+
+/**
+ * Main entry point: extracts text from a scanned PDF buffer using OCR.
+ * Processes the full document in sequential batches without artificial 4-page limits.
+ *
  * @param {Buffer} pdfBuffer - File buffer
- * @param {Object} options - Custom options (filename, maxPages, onProgress)
+ * @param {Object} options - Custom options (filename, maxPages, onProgress, batchSize)
  * @returns {Promise<{ text: string, pagesProcessed: number, totalPages: number, isOcr: boolean, engine: string }>}
  */
 async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
@@ -434,149 +577,112 @@ async function extractTextFromScannedPDF(pdfBuffer, options = {}) {
     );
   }
 
-  const tempDir = path.join(
-    os.tmpdir(),
-    `smartnotes-ocr-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
-  );
-  fs.mkdirSync(tempDir, { recursive: true });
+  const totalPages = await getPdfPageCount(null, pdfBuffer);
+  const maxPages = options.maxPages || totalPages;
+  const pagesToProcess = Math.min(totalPages, maxPages);
 
-  const inputPdfPath = path.join(tempDir, 'document.pdf');
-  fs.writeFileSync(inputPdfPath, pdfBuffer);
-
-  const doOCR = async () => {
-    const totalPages = await getPdfPageCount(inputPdfPath, pdfBuffer);
-    const maxPages = options.maxPages || OCR_CONFIG.maxOcrPages;
-    const pagesToProcess = Math.min(totalPages, maxPages);
-
-    const pageTexts = [];
-    let engineUsed = 'native';
-
-    if (typeof options.onProgress === 'function') {
-      try {
-        await options.onProgress(0, pagesToProcess, `Preparing ${pagesToProcess} scanned page${pagesToProcess > 1 ? 's' : ''} for OCR...`);
-      } catch (_) {}
-    }
-
-    // 1. Try Native Engine (Docker / Render)
-    if (env.hasNative) {
-      try {
-        console.log(
-          `[OCR] Running native engine on "${options.filename || 'document.pdf'}" (${totalPages} total pages, processing ${pagesToProcess})...`
-        );
-        const imageFiles = await convertPdfToImagesNative(env.pdftoppmPath, inputPdfPath, tempDir, pagesToProcess);
-
-        for (let i = 0; i < imageFiles.length; i++) {
-          const pageNum = i + 1;
-          const imgPath = imageFiles[i];
-
-          if (typeof options.onProgress === 'function') {
-            try {
-              await options.onProgress(pageNum, pagesToProcess, `Extracting text with OCR (page ${pageNum} of ${pagesToProcess})...`);
-            } catch (_) {}
-          }
-
-          try {
-            const rawText = await ocrImageNative(env.tesseractPath, imgPath);
-            const cleaned = rawText
-              .replace(/\f/g, '')
-              .replace(/\r\n/g, '\n')
-              .replace(/\n{3,}/g, '\n\n')
-              .trim();
-
-            if (cleaned) {
-              pageTexts.push(`--- Page ${pageNum} ---\n${cleaned}`);
-            }
-          } catch (pageErr) {
-            console.warn(`[OCR] Native page ${pageNum} warning:`, pageErr.message);
-            // If native Tesseract fails with execution error, rethrow to trigger fast fallback to Tesseract.js
-            // rather than failing every subsequent page and exhausting timeout
-            throw pageErr;
-          }
+  // 1. Check for pages that already have selectable text (mixed-document optimization)
+  const directPagesMap = new Map();
+  try {
+    const parser = new PDFParse({ data: pdfBuffer });
+    const directResult = await parser.getText();
+    if (directResult && directResult.pages) {
+      for (const p of directResult.pages) {
+        const clean = (p.text || '').replace(/--\s*\d+\s+of\s+\d+\s*--/gi, ' ').trim();
+        const words = clean.split(/\s+/).filter(w => w.length > 1);
+        if (words.length >= 5) {
+          directPagesMap.set(p.num, clean);
         }
-      } catch (nativeErr) {
-        console.warn(`[OCR] Native engine encountered error: ${nativeErr.message}. Falling back to Tesseract.js.`);
-        pageTexts.length = 0; // Reset for fallback
       }
     }
+    if (typeof parser.destroy === 'function') {
+      try { await parser.destroy(); } catch (_) {}
+    }
+  } catch (_) {}
 
-    // 2. Fallback to Tesseract.js if native produced no pages or is unavailable
-    if (pageTexts.length === 0 && env.hasTesseractJs) {
-      engineUsed = 'tesseract.js';
-      console.log(
-        `[OCR] Running Tesseract.js engine on "${options.filename || 'document.pdf'}" (${totalPages} pages, processing ${pagesToProcess})...`
-      );
+  const allPageNumbers = [];
+  for (let i = 1; i <= pagesToProcess; i++) {
+    allPageNumbers.push(i);
+  }
 
-      const imageBuffers = await convertPdfToImagesJs(pdfBuffer, pagesToProcess);
-      for (let i = 0; i < imageBuffers.length; i++) {
-        const pageNum = i + 1;
+  // Identify pages needing OCR
+  const pagesNeedingOcr = allPageNumbers.filter(p => !directPagesMap.has(p));
+  const ocrResultsMap = new Map();
 
-        if (typeof options.onProgress === 'function') {
-          try {
-            await options.onProgress(pageNum, pagesToProcess, `Extracting text with OCR (page ${pageNum} of ${pagesToProcess})...`);
-          } catch (_) {}
-        }
+  if (pagesNeedingOcr.length > 0) {
+    const batchSize = options.batchSize || OCR_CONFIG.batchSize || 3;
+    const batches = [];
+    for (let i = 0; i < pagesNeedingOcr.length; i += batchSize) {
+      batches.push(pagesNeedingOcr.slice(i, i + batchSize));
+    }
 
+    for (let b = 0; b < batches.length; b++) {
+      const batch = batches[b];
+      const startP = batch[0];
+      const endP = batch[batch.length - 1];
+
+      if (typeof options.onProgress === 'function') {
         try {
-          const rawText = await ocrImageJs(imageBuffers[i]);
-          const cleaned = rawText
+          await options.onProgress(startP, pagesToProcess, `Extracting text with OCR (pages ${startP}–${endP} of ${pagesToProcess})...`);
+        } catch (_) {}
+      }
+
+      const batchResults = await processBatch(pdfBuffer, batch, options);
+
+      for (const r of batchResults) {
+        if (r.success && r.text && r.text.trim()) {
+          const cleaned = r.text
             .replace(/\f/g, '')
             .replace(/\r\n/g, '\n')
             .replace(/\n{3,}/g, '\n\n')
             .trim();
-
           if (cleaned) {
-            pageTexts.push(`--- Page ${pageNum} ---\n${cleaned}`);
+            ocrResultsMap.set(r.pageNum, cleaned);
           }
-        } catch (jsErr) {
-          console.warn(`[OCR] Tesseract.js page ${pageNum} warning:`, jsErr.message);
         }
       }
     }
-
-    let fullText = pageTexts.join('\n\n').trim();
-
-    // Word count validation
-    const words = fullText
-      .replace(/--- Page \d+ ---/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .split(/\s+/)
-      .filter(w => w.length > 1);
-
-    if (!fullText || words.length < OCR_CONFIG.minWordsRequired) {
-      throw new Error(
-        'OCR completed, but no readable text could be recognized. The scanned document might be blank, severely blurred, or unsupported. Please ensure the scan contains clear English text.'
-      );
-    }
-
-    if (totalPages > pagesToProcess) {
-      fullText += `\n\n[Note: Document contains ${totalPages} pages. The first ${pagesToProcess} pages were processed with OCR to stay within server resource limits.]`;
-    }
-
-    console.log(`[OCR] Extraction succeeded via ${engineUsed} (${words.length} words across ${pageTexts.length} pages).`);
-
-    return {
-      text: fullText,
-      pagesProcessed: pageTexts.length,
-      totalPages: totalPages,
-      isOcr: true,
-      engine: engineUsed
-    };
-  };
-
-  try {
-    return await Promise.race([
-      doOCR(),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('OCR processing exceeded server time limit.')), OCR_CONFIG.totalOcrTimeoutMs)
-      )
-    ]);
-  } finally {
-    // Guaranteed disk cleanup
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    } catch (_) {}
   }
+
+  // Combine in exact original page order
+  const pageTexts = [];
+  for (let p = 1; p <= pagesToProcess; p++) {
+    if (directPagesMap.has(p)) {
+      pageTexts.push(`--- Page ${p} ---\n${directPagesMap.get(p)}`);
+    } else if (ocrResultsMap.has(p)) {
+      pageTexts.push(`--- Page ${p} ---\n${ocrResultsMap.get(p)}`);
+    }
+  }
+
+  let fullText = pageTexts.join('\n\n').trim();
+
+  // Word count validation
+  const words = fullText
+    .replace(/--- Page \d+ ---/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(w => w.length > 1);
+
+  if (!fullText || words.length < OCR_CONFIG.minWordsRequired) {
+    throw new Error(
+      'OCR completed, but no readable text could be recognized. The scanned document might be blank, severely blurred, or unsupported. Please ensure the scan contains clear English text.'
+    );
+  }
+
+  if (totalPages > pagesToProcess) {
+    fullText += `\n\n[Note: Document contains ${totalPages} pages. The first ${pagesToProcess} pages were processed with OCR to stay within server resource limits.]`;
+  }
+
+  console.log(`[OCR] Extraction succeeded across ${pageTexts.length} pages (${words.length} words).`);
+
+  return {
+    text: fullText,
+    pagesProcessed: pageTexts.length,
+    totalPages: totalPages,
+    isOcr: true,
+    engine: env.hasNative ? 'native-batch' : 'tesseract.js-batch'
+  };
 }
 
 /**
@@ -589,6 +695,7 @@ function setMockOCRHandler(handler) {
 
 module.exports = {
   extractTextFromScannedPDF,
+  processBatch,
   detectOCREnvironment,
   findSystemBinary,
   testBinary,
@@ -600,3 +707,4 @@ module.exports = {
   setMockOCRHandler,
   OCR_CONFIG
 };
+

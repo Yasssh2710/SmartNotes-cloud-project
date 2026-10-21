@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ask My Notes — SmartNotes</title>
+  <meta name="description" content="Ask questions and get accurate AI answers grounded directly in your uploaded study notes and scanned textbook pages.">
+
+  <!-- CDNs -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/ask.css">
+</head>
+<body>
+
+  <!-- Backdrop for Mobile Sidebar -->
+  <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+
+  <div class="app-wrapper">
+    <!-- Sidebar -->
+    <aside class="app-sidebar">
+      <div class="sidebar-header">
+        <a class="brand-logo" href="dashboard.html">
+          <div class="brand-icon">
+            <i class="fa-solid fa-book-open-reader"></i>
+          </div>
+          <div>
+            <div>SmartNotes</div>
+            <div class="brand-tagline">Store. Understand. Revise.</div>
+          </div>
+        </a>
+      </div>
+
+      <div class="sidebar-nav">
+        <div class="nav-section-title">Academic Space</div>
+        <a href="dashboard.html" class="sidebar-link">
+          <i class="fa-solid fa-house"></i>
+          <span>Dashboard</span>
+        </a>
+        <a href="notes.html" class="sidebar-link">
+          <i class="fa-solid fa-note-sticky"></i>
+          <span>My Notes</span>
+        </a>
+        <a href="subjects.html" class="sidebar-link">
+          <i class="fa-solid fa-layer-group"></i>
+          <span>Subjects</span>
+        </a>
+        <a href="upload.html" class="sidebar-link">
+          <i class="fa-solid fa-cloud-arrow-up"></i>
+          <span>Upload Notes</span>
+        </a>
+
+        <div class="nav-section-title">AI Revision</div>
+        <a href="summary.html" class="sidebar-link">
+          <i class="fa-solid fa-wand-magic-sparkles"></i>
+          <span>AI Summary</span>
+          <span class="sidebar-badge">Smart</span>
+        </a>
+        <a href="quiz.html" class="sidebar-link">
+          <i class="fa-solid fa-circle-question"></i>
+          <span>AI Quiz</span>
+        </a>
+        <a href="ask.html" class="sidebar-link active">
+          <i class="fa-solid fa-comments"></i>
+          <span>Ask My Notes</span>
+          <span class="sidebar-badge" style="background: rgba(16, 185, 129, 0.15); color: #10b981;">AI</span>
+        </a>
+
+        <div class="nav-section-title">User</div>
+        <a href="profile.html" class="sidebar-link">
+          <i class="fa-regular fa-id-badge"></i>
+          <span>Profile</span>
+        </a>
+        <a href="settings.html" class="sidebar-link">
+          <i class="fa-solid fa-gear"></i>
+          <span>Settings</span>
+        </a>
+        <a href="#" class="sidebar-link text-danger" onclick="logoutUser(); return false;">
+          <i class="fa-solid fa-arrow-right-from-bracket text-danger"></i>
+          <span>Logout</span>
+        </a>
+      </div>
+
+      <div class="sidebar-footer">
+        <a href="profile.html" class="user-profile-summary">
+          <div class="user-avatar student-avatar-initials">AS</div>
+          <div class="user-info">
+            <div class="user-name student-name-display">Alex Student</div>
+            <div class="user-email student-email-display">student@smartnotes.demo</div>
+          </div>
+        </a>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <div class="app-main">
+      <!-- Top Navigation Header -->
+      <header class="app-header">
+        <div class="d-flex align-items-center gap-3">
+          <button class="icon-btn d-lg-none" id="sidebarToggle" type="button" aria-label="Toggle menu">
+            <i class="fa-solid fa-bars"></i>
+          </button>
+          <div class="header-search">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <input type="text" class="header-search-input" id="globalSearchInput" placeholder="Search notes, subjects, tags...">
+          </div>
+        </div>
+
+        <div class="header-actions">
+          <button class="icon-btn theme-toggle-btn" type="button" title="Toggle dark/light mode">
+            <i class="fa-solid fa-moon"></i>
+          </button>
+          <div class="user-avatar student-avatar-initials" style="width: 38px; height: 38px;">AS</div>
+        </div>
+      </header>
+
+      <!-- Page Content -->
+      <main class="app-content">
+        <!-- Page Header -->
+        <div class="page-header mb-3">
+          <div>
+            <h1 class="page-title">
+              <i class="fa-solid fa-comments text-primary me-2"></i> Ask My Notes
+            </h1>
+            <p class="page-subtitle">Get instant answers grounded strictly in your uploaded notes with page citations.</p>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <label for="askDocSelect" class="form-label mb-0 text-muted" style="font-size: 0.85rem; white-space: nowrap;">Target Document:</label>
+            <select class="form-select form-select-sm" id="askDocSelect" style="min-width: 250px;">
+              <option value="">Loading your documents...</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Chat Workspace -->
+        <div class="ask-workspace">
+          <!-- Document Info Bar -->
+          <div class="ask-doc-bar" id="askDocBar">
+            <div class="ask-doc-info">
+              <div class="ask-doc-icon" id="askDocIcon">
+                <i class="fa-solid fa-file-pdf"></i>
+              </div>
+              <div>
+                <div class="ask-doc-title" id="askDocTitle">Select a document above</div>
+                <div class="ask-doc-subtitle" id="askDocSubtitle">Uploads, lecture slides, and scanned notes</div>
+              </div>
+            </div>
+            <div class="d-flex align-items-center gap-2" id="askDocActions">
+              <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1" id="askDocBadge">
+                Ready
+              </span>
+              <button class="btn btn-sm btn-light-custom" id="btnClearChatBtn" title="Clear conversation history">
+                <i class="fa-solid fa-rotate-right me-1"></i> New Chat
+              </button>
+            </div>
+          </div>
+
+          <!-- Document Warning Banner (Hidden by default) -->
+          <div class="ask-doc-warning" id="askDocWarning" style="display: none;">
+            <div class="d-flex align-items-center gap-2">
+              <i class="fa-solid fa-circle-exclamation" id="askWarningIcon"></i>
+              <span id="askWarningMessage">This document is currently processing OCR.</span>
+            </div>
+            <button class="btn btn-sm btn-outline-warning text-nowrap" id="btnRetryFailedPages" style="display: none;">
+              <i class="fa-solid fa-arrows-rotate me-1"></i> Retry Failed Pages
+            </button>
+          </div>
+
+          <!-- Messages Container -->
+          <div class="ask-messages-container" id="askMessagesContainer">
+            <!-- Empty state (default) -->
+            <div class="ask-empty-state" id="askEmptyState">
+              <div class="ask-empty-orb">
+                <i class="fa-solid fa-wand-magic-sparkles"></i>
+              </div>
+              <div class="ask-empty-title">Ask anything about your study notes</div>
+              <div class="ask-empty-desc">
+                Select one of your uploaded documents and ask questions. SmartNotes grounds every answer directly in your notes and cites the exact source pages.
+              </div>
+              <div class="ask-suggestions-grid" id="askSuggestionsGrid">
+                <div class="ask-suggestion-pill" data-prompt="What are the key concepts and definitions covered in these notes?">
+                  <i class="fa-regular fa-lightbulb text-warning"></i> Key Concepts & Definitions
+                </div>
+                <div class="ask-suggestion-pill" data-prompt="Summarize the core exam takeaways and important formulas.">
+                  <i class="fa-solid fa-star text-primary"></i> High-Yield Exam Takeaways
+                </div>
+                <div class="ask-suggestion-pill" data-prompt="What are the primary differences or comparisons explained in this document?">
+                  <i class="fa-solid fa-scale-balanced text-info"></i> Core Comparisons
+                </div>
+                <div class="ask-suggestion-pill" data-prompt="Explain the main architecture or methodology described in this document.">
+                  <i class="fa-solid fa-diagram-project text-success"></i> Architecture & Methods
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Input Bar -->
+          <div class="ask-input-bar">
+            <textarea
+              class="ask-textarea"
+              id="askQuestionInput"
+              rows="1"
+              placeholder="Ask a question about this document... (Press Enter to send, Shift+Enter for new line)"
+            ></textarea>
+            <button class="ask-send-btn" id="btnSendQuestion" type="button" title="Send question">
+              <i class="fa-solid fa-paper-plane"></i>
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="js/main.js"></script>
+  <script src="js/ask.js"></script>
+</body>
+</html>

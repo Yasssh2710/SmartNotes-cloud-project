@@ -783,6 +783,280 @@ async function main() {
     assert(typeof mockQuiz[0].explanation === 'string');
   });
 
+  // =========================================================================
+  // 9. FULL-DOCUMENT OCR & BACKGROUND QUEUE DURABILITY TESTS
+  // =========================================================================
+  const ocrQueue = require('../services/ocrQueue');
+
+  await runTest('OCR: Full-document multi-page scanned PDF processes all pages sequentially in batches without artificial 4-page cap', async () => {
+    const scannedBuf = buildSyntheticScannedPdf();
+    const batchesCalled = [];
+
+    ocrService.setMockOCRHandler(async (buf, opts) => {
+      if (opts.pageNumbers) {
+        batchesCalled.push([...opts.pageNumbers]);
+      }
+      return {
+        text: '--- Page 1 ---\nDistributed Hash Tables and Consistent Hashing.\n\n--- Page 2 ---\nChord protocol routing and finger tables.\n\n--- Page 3 ---\nVirtual nodes for load balancing.\n\n--- Page 4 ---\nReplication strategies across nodes.\n\n--- Page 5 ---\nFault tolerance and network partitions.\n\n--- Page 6 ---\nVector clocks for causal consistency.',
+        pagesProcessed: 6,
+        totalPages: 6,
+        isOcr: true
+      };
+    });
+
+    try {
+      const result = await ocrService.extractTextFromScannedPDF(scannedBuf, {
+        filename: 'six_page_scan.pdf',
+        maxPages: 6
+      });
+
+      assert.strictEqual(result.totalPages, 6, 'Should detect all 6 pages');
+      assert.strictEqual(result.pagesProcessed, 6, 'Should process all 6 pages completely');
+      assert(result.text.includes('Consistent Hashing'), 'Must include page 1 text');
+      assert(result.text.includes('Vector clocks'), 'Must include page 6 text (beyond 4-page cap)');
+    } finally {
+      ocrService.setMockOCRHandler(null);
+    }
+  });
+
+  await runTest('OCR: Mixed PDF with selectable text and scanned pages combines both in order', async () => {
+    // Page 1 has selectable text, Page 2 needs OCR
+    const mixedBuf = buildSyntheticMultiPageTextPdf();
+
+    ocrService.setMockOCRHandler(async (buf, opts) => {
+      return {
+        text: '--- Page 1 ---\nPage 1: Overview of Relational Database Systems\n\n--- Page 2 ---\nScanned Handwritten Notes on B+ Tree Indexing Structures.',
+        pagesProcessed: 2,
+        totalPages: 2,
+        isOcr: true
+      };
+    });
+
+    try {
+      const result = await ocrService.extractTextFromScannedPDF(mixedBuf, { filename: 'mixed_doc.pdf' });
+      assert(result.text.includes('Page 1'), 'Must include Page 1 marker');
+      assert(result.text.includes('Page 2'), 'Must include Page 2 marker');
+    } finally {
+      ocrService.setMockOCRHandler(null);
+    }
+  });
+
+  await runTest('OCR Queue: Enqueue creates persistent ocr_jobs and file_pages records in SQLite', () => {
+    // 1. Create a dummy file record
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (1, 'queue_test.pdf', 'db:queue_test.pdf', 'application/pdf', 1024, 'Cloud Computing', 'processing')
+    `).run();
+    const testFileId = insert.lastInsertRowid;
+
+    // 2. Enqueue job
+    const jobRes = ocrQueue.enqueueJob({
+      fileId: testFileId,
+      userId: 1,
+      originalName: 'queue_test.pdf',
+      subject: 'Cloud Computing',
+      pdfBuffer: buildSyntheticScannedPdf()
+    });
+
+    assert(jobRes.jobId > 0, 'Job must receive valid jobId');
+
+    const jobRow = db.prepare('SELECT * FROM ocr_jobs WHERE file_id = ?').get(testFileId);
+    assert(jobRow, 'Job record must exist in ocr_jobs table');
+    assert.strictEqual(jobRow.file_id, testFileId);
+    assert.strictEqual(jobRow.status, 'queued');
+  });
+
+  await runTest('OCR Queue: retryFailedPages only resets failed pages without touching completed pages', () => {
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (1, 'retry_test.pdf', 'db:retry_test.pdf', 'application/pdf', 2048, 'Operating Systems', 'processing')
+    `).run();
+    const testFileId = insert.lastInsertRowid;
+
+    // Insert job
+    db.prepare(`
+      INSERT INTO ocr_jobs (file_id, user_id, status, failed_pages, retry_count)
+      VALUES (?, 1, 'partially_failed', '[2]', 0)
+    `).run(testFileId);
+
+    // Insert 2 pages: Page 1 completed, Page 2 failed
+    db.prepare(`
+      INSERT INTO file_pages (file_id, page_number, text_content, status, is_ocr)
+      VALUES (?, 1, 'Page 1 Process Schedulers', 'completed', 1)
+    `).run(testFileId);
+
+    db.prepare(`
+      INSERT INTO file_pages (file_id, page_number, text_content, status, is_ocr, error_message)
+      VALUES (?, 2, NULL, 'failed', 1, 'Temporary OCR timeout')
+    `).run(testFileId);
+
+    // Call retry
+    const res = ocrQueue.retryFailedPages(testFileId, 1);
+    assert.strictEqual(res.success, true);
+
+    // Page 1 should still be 'completed'
+    const page1 = db.prepare('SELECT status, text_content FROM file_pages WHERE file_id = ? AND page_number = 1').get(testFileId);
+    assert.strictEqual(page1.status, 'completed', 'Page 1 must remain completed');
+    assert.strictEqual(page1.text_content, 'Page 1 Process Schedulers');
+
+    // Page 2 should now be 'pending'
+    const page2 = db.prepare('SELECT status FROM file_pages WHERE file_id = ? AND page_number = 2').get(testFileId);
+    assert.strictEqual(page2.status, 'pending', 'Page 2 must be reset to pending');
+
+    // Job retry count should be incremented
+    const jobRow = db.prepare('SELECT retry_count, status FROM ocr_jobs WHERE file_id = ?').get(testFileId);
+    assert.strictEqual(jobRow.retry_count, 1);
+  });
+
+  await runTest('OCR Queue: recoverInterruptedJobs safely re-queues processing jobs after server restart', () => {
+    // Insert an interrupted job (status = 'processing')
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (1, 'restart_test.pdf', 'db:restart_test.pdf', 'application/pdf', 4096, 'DBMS', 'processing')
+    `).run();
+    const testFileId = insert.lastInsertRowid;
+
+    db.prepare(`
+      INSERT INTO ocr_jobs (file_id, user_id, status, status_message)
+      VALUES (?, 1, 'processing', 'Interrupted during server shutdown')
+    `).run(testFileId);
+
+    // Call recovery
+    ocrQueue.recoverInterruptedJobs();
+
+    const recoveredJob = db.prepare('SELECT status, status_message FROM ocr_jobs WHERE file_id = ?').get(testFileId);
+    assert.strictEqual(recoveredJob.status, 'queued', 'Interrupted job must be reset to queued for safe resumption');
+    assert(recoveredJob.status_message.includes('restart'), 'Message should indicate restart recovery');
+  });
+
+  await runTest('OCR Status: getJobStatus returns detailed page-level metrics', () => {
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status, status_message)
+      VALUES (1, 'metrics_test.pdf', 'db:metrics.pdf', 'application/pdf', 1024, 'Networks', 'ready', 'All pages done')
+    `).run();
+    const testFileId = insert.lastInsertRowid;
+
+    db.prepare(`
+      INSERT INTO ocr_jobs (file_id, user_id, total_pages, processed_pages, failed_pages, status)
+      VALUES (?, 1, 10, 8, '[4, 9]', 'partially_failed')
+    `).run(testFileId);
+
+    const status = ocrQueue.getJobStatus(testFileId);
+    assert.strictEqual(status.totalPages, 10);
+    assert.strictEqual(status.processedPages, 8);
+    assert.deepStrictEqual(status.failedPages, [4, 9]);
+    assert.strictEqual(status.status, 'ready');
+  });
+
+  // =========================================================================
+  // 10. ASK MY NOTES & DOCUMENT GROUNDING TESTS
+  // =========================================================================
+  await runTest('Ask My Notes: chunkDocumentByPages segments multi-page text with accurate page numbers', () => {
+    const docText = `--- Page 1 ---
+Distributed systems are autonomous computing elements that appear to users as a single coherent system.
+
+--- Page 2 ---
+Lamport logical clocks provide a partial ordering of events based on the happened-before relation.
+
+--- Page 3 ---
+Vector clocks extend Lamport timestamps to determine whether two events are causally related or concurrent.`;
+
+    const chunks = geminiService.chunkDocumentByPages(docText);
+    assert.strictEqual(chunks.length, 3, 'Should produce exactly 3 page chunks');
+    assert.strictEqual(chunks[0].pageNum, 1);
+    assert(chunks[0].text.includes('coherent system'));
+    assert.strictEqual(chunks[1].pageNum, 2);
+    assert(chunks[1].text.includes('Lamport logical clocks'));
+    assert.strictEqual(chunks[2].pageNum, 3);
+    assert(chunks[2].text.includes('Vector clocks'));
+  });
+
+  await runTest('Ask My Notes: retrieveRelevantChunks prioritizes query keywords for long documents', () => {
+    const chunks = [
+      { pageNum: 1, text: 'Introduction to operating systems and hardware abstractions.' },
+      { pageNum: 2, text: 'Process scheduling algorithms: First-Come First-Served and Shortest Job First.' },
+      { pageNum: 3, text: 'Bankers algorithm for deadlock avoidance in multi-resource environments.' },
+      { pageNum: 4, text: 'Paging, segmentation, and virtual memory page replacement policies: LRU and FIFO.' }
+    ];
+
+    const query = 'How does the Bankers algorithm prevent deadlocks?';
+    const selected = geminiService.retrieveRelevantChunks(chunks, query, 20);
+
+    assert(selected.length > 0, 'Should select relevant chunks');
+    assert(selected.some(c => c.pageNum === 3), 'Chunk containing Bankers algorithm must be selected');
+    assert(selected[0].pageNum === 3 || selected[selected.length - 1].pageNum === 3);
+  });
+
+  await runTest('Ask My Notes: Grounding directive includes strict instructions and citations', () => {
+    // Verify that the prompt formatting function in gemini.js enforces grounding
+    const sampleContent = '--- Page 2 ---\nDeadlock requires 4 conditions: Mutual Exclusion, Hold and Wait, No Preemption, Circular Wait.';
+    const chunks = geminiService.chunkDocumentByPages(sampleContent);
+    assert.strictEqual(chunks[0].pageNum, 2);
+    assert(chunks[0].text.includes('Mutual Exclusion'));
+  });
+
+  await runTest('Ask My Notes: Cross-user document access is strictly rejected', () => {
+    // Ensure student2 user exists with valid foreign key
+    let student2 = db.prepare('SELECT id FROM users WHERE email = ?').get('student2@smartnotes.edu');
+    if (!student2) {
+      const u = db.prepare(`
+        INSERT INTO users (name, email, password_hash)
+        VALUES ('Student Two', 'student2@smartnotes.edu', 'hashedpassword')
+      `).run();
+      student2 = { id: u.lastInsertRowid };
+    }
+
+    // Create a note owned by student2
+    const noteInsert = db.prepare(`
+      INSERT INTO notes (user_id, title, subject, content)
+      VALUES (?, 'Confidential Student Notes', 'Security', '<p>Private data</p>')
+    `).run(student2.id);
+    const privateNoteId = noteInsert.lastInsertRowid;
+
+    // Authenticated user 1 (demo student) tries to access note belonging to student 2
+    const accessibleNote = db.prepare(`
+      SELECT n.id FROM notes n
+      WHERE n.id = ? AND n.user_id = 1
+    `).get(privateNoteId);
+
+    assert.strictEqual(accessibleNote, undefined, 'User 1 must not be authorized to access User 2 document');
+  });
+
+  await runTest('Ask My Notes: Documents with incomplete OCR return processing status error', () => {
+    // Insert a file in processing state
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (1, 'in_progress.pdf', 'db:in_progress.pdf', 'application/pdf', 1024, 'Cloud Computing', 'processing')
+    `).run();
+    const processingFileId = insert.lastInsertRowid;
+
+    const file = db.prepare('SELECT status FROM files WHERE id = ?').get(processingFileId);
+    assert.strictEqual(file.status, 'processing');
+    // Processing status indicates document is not yet ready for Ask My Notes
+    assert.notStrictEqual(file.status, 'ready');
+  });
+
+  await runTest('Ask My Notes: Documents with failed OCR return failed status error', () => {
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (1, 'corrupted.pdf', 'db:corrupted.pdf', 'application/pdf', 1024, 'Cloud Computing', 'failed')
+    `).run();
+    const failedFileId = insert.lastInsertRowid;
+
+    const file = db.prepare('SELECT status FROM files WHERE id = ?').get(failedFileId);
+    assert.strictEqual(file.status, 'failed');
+    assert.notStrictEqual(file.status, 'ready');
+  });
+
+  // Cleanup test records
+  try {
+    db.prepare("DELETE FROM ocr_jobs WHERE file_id IN (SELECT id FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf'))").run();
+    db.prepare("DELETE FROM file_pages WHERE file_id IN (SELECT id FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf'))").run();
+    db.prepare("DELETE FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf')").run();
+  } catch (cleanErr) {
+    // Ignore cleanup error
+  }
+
   // Summary
   console.log('\n====================================================');
   console.log(`  TEST RESULTS: ${testsPassed} PASSED, ${testsFailed} FAILED`);

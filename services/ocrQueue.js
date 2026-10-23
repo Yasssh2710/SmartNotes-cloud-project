@@ -455,6 +455,19 @@ function retryFailedPages(fileId, userId) {
     return { success: false, message: 'There are no failed pages to retry for this document.' };
   }
 
+  // Bounded retry safeguard: prevent infinite retry loops on corrupt/unreadable scans
+  const MAX_PAGE_RETRY_COUNT = 3;
+  if (file.job_id) {
+    const jobRow = db.prepare('SELECT retry_count FROM ocr_jobs WHERE id = ?').get(file.job_id);
+    if (jobRow && jobRow.retry_count >= MAX_PAGE_RETRY_COUNT) {
+      return {
+        success: false,
+        maxRetriesReached: true,
+        message: `Maximum retry limit (${MAX_PAGE_RETRY_COUNT}) reached. Some pages could not be recognized as readable English text.`
+      };
+    }
+  }
+
   // Reset failed pages to pending
   db.prepare(`
     UPDATE file_pages
@@ -528,6 +541,33 @@ function recoverInterruptedJobs() {
         `).run(job.file_id);
       }
       scheduleNext();
+    }
+
+    // Also check for orphaned file records stuck in 'processing' without an active job row
+    const orphanedFiles = db.prepare(`
+      SELECT f.id, f.user_id, f.original_filename, f.subject, f.file_data
+      FROM files f
+      LEFT JOIN ocr_jobs j ON f.id = j.file_id
+      WHERE f.status = 'processing' AND j.id IS NULL
+    `).all();
+
+    for (const orphan of orphanedFiles) {
+      if (orphan.file_data) {
+        console.log(`[OCR Recovery] Re-queuing orphaned processing file "${orphan.original_filename}" (id=${orphan.id})`);
+        enqueueJob({
+          fileId: orphan.id,
+          userId: orphan.user_id,
+          originalName: orphan.original_filename,
+          subject: orphan.subject,
+          pdfBuffer: orphan.file_data
+        });
+      } else {
+        db.prepare(`
+          UPDATE files
+          SET status = 'failed', status_message = 'Processing interrupted by server restart.'
+          WHERE id = ?
+        `).run(orphan.id);
+      }
     }
   } catch (err) {
     console.warn('[OCR Recovery] Interrupted job recovery check notice:', err.message);

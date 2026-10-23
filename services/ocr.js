@@ -14,18 +14,23 @@ const { PDFParse } = require('pdf-parse');
 
 const execFilePromise = util.promisify(execFile);
 
-// Resource and processing safeguards for Render free tier (512MB RAM limit)
+// Resource and processing safeguards configurable for Render free tier or high-memory Azure App Service
 const OCR_CONFIG = {
   maxFileSize: 25 * 1024 * 1024, // 25 MB maximum
-  batchSize: 3,                  // 3 pages per sequential batch (optimal for Render 512MB RAM)
+  batchSize: process.env.OCR_BATCH_SIZE ? parseInt(process.env.OCR_BATCH_SIZE, 10) : 3,
   maxOcrPages: 60,               // Default safety cap for synchronous direct caller (queue handles full docs)
-  dpi: 130,                     // 130 DPI with grayscale: fast rendering, low RAM, high OCR accuracy
-  pageTimeoutMs: 45000,         // 45s per page OCR timeout (safeguard for low/throttled CPU)
-  convertTimeoutMs: 45000,      // 45s PDF-to-image conversion timeout per batch
+  dpi: process.env.OCR_DPI ? parseInt(process.env.OCR_DPI, 10) : 130,
+  pageTimeoutMs: process.env.OCR_PAGE_TIMEOUT_MS ? parseInt(process.env.OCR_PAGE_TIMEOUT_MS, 10) : 45000,
+  convertTimeoutMs: process.env.OCR_CONVERT_TIMEOUT_MS ? parseInt(process.env.OCR_CONVERT_TIMEOUT_MS, 10) : 45000,
   totalOcrTimeoutMs: 300000,    // 300s fallback safeguard for direct synchronous calls
   minWordsRequired: 3,          // Minimum meaningful words to consider extraction successful
   language: 'eng'               // Default Tesseract language
 };
+
+// Enforce single-threaded execution for native OCR to stay within Render Free tier 512MB RAM limits
+if (!process.env.OMP_THREAD_LIMIT) {
+  process.env.OMP_THREAD_LIMIT = '1';
+}
 
 // Test hook for mock/simulation in testing environments
 let mockOCRHandler = null;
@@ -60,10 +65,10 @@ function getTessdataDirectory() {
   const langFile = `${OCR_CONFIG.language}.traineddata`;
   const candidates = [];
 
-  // Check TESSDATA_PREFIX subfolder 'tessdata' first, then prefix directory directly
+  // Check TESSDATA_PREFIX directly first, then subfolder 'tessdata'
   if (process.env.TESSDATA_PREFIX) {
-    candidates.push(path.join(process.env.TESSDATA_PREFIX, 'tessdata'));
     candidates.push(process.env.TESSDATA_PREFIX);
+    candidates.push(path.join(process.env.TESSDATA_PREFIX, 'tessdata'));
   }
 
   // Debian / Linux standard system locations
@@ -184,8 +189,62 @@ async function testBinary(name, args = ['--version']) {
 }
 
 /**
+ * Verifies and collects Tesseract runtime diagnostics:
+ * - Executable path
+ * - Tesseract version (from tesseract --version)
+ * - Available language list (from tesseract --list-langs)
+ * - Tessdata directory and eng.traineddata existence/readability
+ * @returns {Promise<Object>}
+ */
+async function getTesseractDiagnostics() {
+  const tesseractPath = findSystemBinary('tesseract');
+  const pdftoppmPath = findSystemBinary('pdftoppm');
+  const tessDir = getTessdataDirectory();
+  const langFile = `${OCR_CONFIG.language}.traineddata`;
+  const engTrainedDataPath = tessDir ? path.join(tessDir, langFile) : null;
+
+  let version = 'not installed';
+  let availableLangs = [];
+  let engExists = false;
+  let engReadable = false;
+
+  if (tesseractPath) {
+    try {
+      const { stdout } = await execFilePromise(tesseractPath, ['--version'], { timeout: 5000 });
+      version = (stdout.split('\n')[0] || '').trim();
+    } catch (_) {}
+
+    try {
+      const { stdout } = await execFilePromise(tesseractPath, ['--list-langs'], { timeout: 5000 });
+      availableLangs = stdout.split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(l => l && !l.toLowerCase().includes('list of available') && !l.includes(':'));
+    } catch (_) {}
+  }
+
+  if (engTrainedDataPath && fs.existsSync(engTrainedDataPath)) {
+    engExists = true;
+    try {
+      fs.accessSync(engTrainedDataPath, fs.constants.R_OK);
+      engReadable = true;
+    } catch (_) {}
+  }
+
+  return {
+    tesseractPath,
+    pdftoppmPath,
+    version,
+    availableLangs,
+    tessdataDir: tessDir,
+    engTrainedDataPath,
+    engTrainedDataExists: engExists,
+    engTrainedDataReadable: engReadable
+  };
+}
+
+/**
  * Detects the available OCR engines in the current runtime
- * @returns {Promise<{ hasNative: boolean, tesseractPath: string|null, pdftoppmPath: string|null, hasTesseractJs: boolean }>}
+ * @returns {Promise<{ hasNative: boolean, tesseractPath: string|null, pdftoppmPath: string|null, hasTesseractJs: boolean, diagnostics?: Object }>}
  */
 async function detectOCREnvironment() {
   if (mockOCRHandler) {
@@ -193,7 +252,13 @@ async function detectOCREnvironment() {
       hasNative: true,
       tesseractPath: 'mock-tesseract',
       pdftoppmPath: 'mock-pdftoppm',
-      hasTesseractJs: true
+      hasTesseractJs: true,
+      diagnostics: {
+        version: 'mock-tesseract 5.0.0',
+        availableLangs: ['eng', 'osd'],
+        engTrainedDataExists: true,
+        engTrainedDataReadable: true
+      }
     };
   }
 
@@ -210,11 +275,22 @@ async function detectOCREnvironment() {
     }
   } catch (_) {}
 
+  const diagnostics = await getTesseractDiagnostics();
+
+  // Log runtime environment diagnostics once on detection
+  if (tesseractPath && pdftoppmPath) {
+    console.log(
+      `[OCR Diagnostics] Native engine ready: ${tesseractPath} (${diagnostics.version}) | ` +
+      `Langs: [${diagnostics.availableLangs.join(', ')}] | Tessdata: ${diagnostics.tessdataDir} (eng: exists=${diagnostics.engTrainedDataExists}, readable=${diagnostics.engTrainedDataReadable})`
+    );
+  }
+
   return {
     hasNative: !!(tesseractPath && pdftoppmPath),
     tesseractPath,
     pdftoppmPath,
-    hasTesseractJs
+    hasTesseractJs,
+    diagnostics
   };
 }
 
@@ -343,50 +419,130 @@ async function convertPdfToImagesJs(pdfBuffer, maxPages) {
 }
 
 /**
- * Runs OCR on an image file using native Tesseract CLI
+ * Runs OCR on an image file using native Tesseract CLI.
+ * Incorporates robust subprocess error handling, detailed diagnostic logging,
+ * explicit DPI configuration, and layout-mode fallback.
+ *
  * @param {string} tesseractPath
  * @param {string} imagePath
+ * @param {Object} options - { pageNum }
  * @returns {Promise<string>}
  */
-async function ocrImageNative(tesseractPath, imagePath) {
-  const baseArgs = [imagePath, 'stdout', '-l', OCR_CONFIG.language, '--oem', '1'];
+async function ocrImageNative(tesseractPath, imagePath, options = {}) {
+  const pageNum = options.pageNum || 'N';
+  const startTime = Date.now();
 
-  // Add explicit tessdata directory flag if resolved
+  // 1. Verify input image exists and is non-empty
+  const inputExists = fs.existsSync(imagePath);
+  const inputSize = inputExists ? fs.statSync(imagePath).size : 0;
+  if (!inputExists || inputSize === 0) {
+    console.warn(`[OCR Native Subprocess] Page ${pageNum}: Input image missing or 0 bytes (${imagePath})`);
+    return '';
+  }
+
+  // 2. Verify tessdata directory and language traineddata file
   const tessdataDir = getTessdataDirectory();
+  const langFile = `${OCR_CONFIG.language}.traineddata`;
+  let tessdataExists = false;
+  let tessdataReadable = false;
+  if (tessdataDir) {
+    const trainedDataPath = path.join(tessdataDir, langFile);
+    if (fs.existsSync(trainedDataPath)) {
+      tessdataExists = true;
+      try {
+        fs.accessSync(trainedDataPath, fs.constants.R_OK);
+        tessdataReadable = true;
+      } catch (_) {}
+    }
+  }
+
+  const baseArgs = [
+    imagePath,
+    'stdout',
+    '-l', OCR_CONFIG.language,
+    '--dpi', String(OCR_CONFIG.dpi)
+  ];
+
   if (tessdataDir) {
     baseArgs.push('--tessdata-dir', tessdataDir);
   }
 
-  // Optimized single-pass OCR: PSM 3 (Fully automatic page segmentation)
-  // Covers multi-column, standard notes, documents, and slides in ~1s without multi-pass overhead.
-  try {
-    const { stdout } = await execFilePromise(tesseractPath, [
-      ...baseArgs,
-      '--psm', '3'
-    ], {
-      timeout: OCR_CONFIG.pageTimeoutMs,
-      maxBuffer: 5 * 1024 * 1024
-    });
-    const text = (stdout || '').trim();
-    if (text.length > 0) return text;
-  } catch (err) {
-    // Fail-fast on process or configuration errors to avoid redundant timeouts
-    throw new Error(`Native Tesseract OCR failed on page: ${err.message}`);
+  // Sequential PSM fallbacks:
+  // - PSM 3: Fully automatic page segmentation (standard layout)
+  // - PSM 6: Assume single uniform block of text (single column / slides / dense notes)
+  // - PSM 11: Sparse text (find as much text as possible in no particular order)
+  const psmModes = ['3', '6', '11'];
+  let lastError = null;
+
+  for (const psm of psmModes) {
+    try {
+      const { stdout } = await execFilePromise(tesseractPath, [
+        ...baseArgs,
+        '--psm', psm
+      ], {
+        timeout: OCR_CONFIG.pageTimeoutMs,
+        maxBuffer: 5 * 1024 * 1024,
+        env: {
+          ...process.env,
+          OMP_THREAD_LIMIT: '1',
+          TESSDATA_PREFIX: process.env.TESSDATA_PREFIX || '/usr/share/tesseract-ocr/5'
+        }
+      });
+
+      const text = (stdout || '').trim();
+      if (text.length > 0) {
+        return text;
+      }
+    } catch (err) {
+      const durationMs = Date.now() - startTime;
+      const isTimeout = !!(err.killed && (err.code === 'ETIMEDOUT' || err.signal === 'SIGTERM'));
+      const isOOM = !!(err.signal === 'SIGKILL' || err.code === 137);
+      const stderr = (err.stderr || '').trim();
+      const stdout = (err.stdout || '').trim();
+      const exitCode = typeof err.code === 'number' ? err.code : (err.code || 'UNKNOWN');
+      const isEmptyPage = stderr.includes('Empty page!!') || /empty page/i.test(stderr);
+
+      // Safe diagnostic logging (NEVER logs note text, passwords, or credentials)
+      console.warn(`[OCR Native Subprocess] Page ${pageNum} PSM ${psm} failed:
+  duration: ${durationMs}ms
+  exitCode: ${exitCode}
+  signal: ${err.signal || 'none'}
+  isTimeout: ${isTimeout}
+  isOOM: ${isOOM}
+  isEmptyPage: ${isEmptyPage}
+  inputPngExists: ${inputExists} (${inputSize} bytes)
+  tessdataExists: ${tessdataExists} (readable: ${tessdataReadable})
+  stdout: ${stdout ? stdout.length + ' bytes' : '0 bytes'}
+  stderr: "${stderr.substring(0, 300)}"`);
+
+      // If page is genuinely empty (e.g. diagram/illustration with no text), do not treat as fatal error
+      if (isEmptyPage) {
+        return '';
+      }
+
+      // If killed by timeout or OOM, fail-fast without wasting CPU on further PSM modes
+      if (isTimeout) {
+        throw new Error(`Native Tesseract timed out after ${durationMs}ms on page ${pageNum}`);
+      }
+      if (isOOM) {
+        throw new Error(`Native Tesseract killed by OS memory limits (OOM/SIGKILL) on page ${pageNum}`);
+      }
+
+      lastError = err;
+    }
   }
 
-  // Fast single fallback for dense single uniform blocks if PSM 3 returned 0 text without throwing
-  try {
-    const { stdout } = await execFilePromise(tesseractPath, [
-      ...baseArgs,
-      '--psm', '6'
-    ], {
-      timeout: OCR_CONFIG.pageTimeoutMs,
-      maxBuffer: 5 * 1024 * 1024
-    });
-    return (stdout || '').trim();
-  } catch (_) {
+  // If all PSMs returned empty text without throwing, return empty string
+  if (!lastError) {
     return '';
   }
+
+  // If all PSMs threw errors, throw structured error with exact exit code, signal, and stderr info
+  const cleanStderr = (lastError.stderr || '').trim().substring(0, 200);
+  const exitCode = typeof lastError.code === 'number' ? lastError.code : (lastError.code || 'UNKNOWN');
+  const signal = lastError.signal || 'none';
+  const isTimeout = !!(lastError.killed && (lastError.code === 'ETIMEDOUT' || lastError.signal === 'SIGTERM'));
+  throw new Error(`Native Tesseract failed on page ${pageNum} (exitCode: ${exitCode}, signal: ${signal}, timeout: ${isTimeout}, stderr: "${cleanStderr || 'No stderr'}")`);
 }
 
 /**
@@ -458,6 +614,7 @@ async function processBatch(pdfBuffer, pageNumbers, options = {}) {
     // 1. Try Native Engine (Docker / Render)
     let nativeSucceeded = false;
     if (env.hasNative) {
+      const ppmStartTime = Date.now();
       try {
         const prefix = path.join(tempDir, 'page');
         const ppmArgs = [
@@ -487,11 +644,35 @@ async function processBatch(pdfBuffer, pageNumbers, options = {}) {
           if (matched) {
             const imgPath = path.join(tempDir, matched);
             try {
-              const text = await ocrImageNative(env.tesseractPath, imgPath);
+              const text = await ocrImageNative(env.tesseractPath, imgPath, { pageNum });
               results.push({ pageNum, text: text.trim(), success: true, error: null });
             } catch (pageErr) {
               console.warn(`[OCR Native] Page ${pageNum} OCR error:`, pageErr.message);
-              results.push({ pageNum, text: '', success: false, error: pageErr.message });
+
+              // Page-level fallback to Tesseract.js / JS engine if available
+              let recovered = false;
+              if (env.hasTesseractJs) {
+                try {
+                  console.log(`[OCR Native] Attempting Tesseract.js fallback for Page ${pageNum}...`);
+                  const imgBuffer = fs.readFileSync(imgPath);
+                  const jsText = await ocrImageJs(imgBuffer);
+                  results.push({ pageNum, text: (jsText || '').trim(), success: true, error: null });
+                  recovered = true;
+                } catch (jsErr) {
+                  console.warn(`[OCR Native] Tesseract.js fallback also failed for Page ${pageNum}:`, jsErr.message);
+                }
+              }
+
+              if (!recovered) {
+                results.push({ pageNum, text: '', success: false, error: pageErr.message });
+              }
+            } finally {
+              // Immediately delete page PNG to prevent disk exhaustion on large multi-page PDFs
+              try {
+                if (fs.existsSync(imgPath)) {
+                  fs.unlinkSync(imgPath);
+                }
+              } catch (_) {}
             }
           } else {
             results.push({ pageNum, text: '', success: false, error: `pdftoppm did not produce image for page ${pageNum}` });
@@ -500,7 +681,17 @@ async function processBatch(pdfBuffer, pageNumbers, options = {}) {
 
         nativeSucceeded = results.some(r => r.success);
       } catch (nativeErr) {
-        console.warn(`[OCR Batch] Native pdftoppm/tesseract batch failed (${nativeErr.message}). Falling back to Tesseract.js.`);
+        const ppmDuration = Date.now() - (ppmStartTime || Date.now());
+        const ppmStderr = (nativeErr.stderr || '').trim().substring(0, 300);
+        const ppmCode = typeof nativeErr.code === 'number' ? nativeErr.code : (nativeErr.code || 'UNKNOWN');
+        console.warn(`[OCR Native Diagnostic] pdftoppm conversion failed:
+  duration: ${ppmDuration}ms
+  exitCode: ${ppmCode}
+  signal: ${nativeErr.signal || 'none'}
+  isTimeout: ${nativeErr.killed || false}
+  stderr: "${ppmStderr || 'No stderr'}"
+  error: "${nativeErr.message}"
+Falling back to in-memory rendering.`);
         results.length = 0;
       }
     }
@@ -704,6 +895,7 @@ module.exports = {
   ocrImageNative,
   getTessdataDirectory,
   normalizeTessdataPrefix,
+  getTesseractDiagnostics,
   setMockOCRHandler,
   OCR_CONFIG
 };

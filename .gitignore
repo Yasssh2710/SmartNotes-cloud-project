@@ -21,6 +21,7 @@ database/*.sqlite3
 uploads/*
 !uploads/.gitkeep
 *.traineddata
+!eng.traineddata
 
 # Logs
 *.log

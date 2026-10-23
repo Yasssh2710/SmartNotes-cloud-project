@@ -22,7 +22,11 @@ const aiRouter = require('./routes/ai');
 const subjectsRouter = require('./routes/subjects');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+
+// Trust reverse proxy for Azure App Service & Render (X-Forwarded-For, X-Forwarded-Proto)
+app.set('trust proxy', 1);
+
+const PORT = process.env.PORT || process.env.WEBSITES_PORT || 3000;
 const HOST = '0.0.0.0';
 
 // Recover any interrupted OCR jobs from previous server run
@@ -33,13 +37,21 @@ app.use(cors());
 app.use(express.json({ limit: '30mb' }));
 app.use(express.urlencoded({ extended: true, limit: '30mb' }));
 
+// Validate production secrets safely without terminating prematurely
+const isProduction = process.env.NODE_ENV === 'production';
+if (isProduction && !process.env.SESSION_SECRET) {
+  console.warn('[Security Warning] SESSION_SECRET is not set in production. Using fallback secret. Please configure SESSION_SECRET in your environment settings (Render / Cloud).');
+}
+
 // Session Configuration
 app.use(session({
   secret: process.env.SESSION_SECRET || 'smartnotes_college_secret_key_2026',
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: false, // Set to true in production with HTTPS
+    secure: 'auto', // express-session sets secure cookie automatically when request is HTTPS behind trusted proxy
+    httpOnly: true,
+    sameSite: 'lax',
     maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
   }
 }));
@@ -55,7 +67,7 @@ app.use('/api/subjects', subjectsRouter);
 const publicPath = path.join(__dirname, 'public');
 app.use(express.static(publicPath));
 
-// Health check endpoint for container and cloud deployments (e.g. Render)
+// Health check endpoint for container and cloud deployments (Azure App Service / Render)
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok', uptime: process.uptime() });
 });
@@ -75,7 +87,7 @@ app.use((err, req, res, next) => {
 });
 
 // Start Server
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log('====================================================');
   console.log(`  SmartNotes Web Server is running!`);
   console.log(`  URL: http://localhost:${PORT}`);
@@ -83,3 +95,28 @@ app.listen(PORT, HOST, () => {
   console.log(`  Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log('====================================================');
 });
+
+// Graceful shutdown handling for container deployments (Azure App Service sends SIGTERM)
+function handleShutdown(signal) {
+  console.log(`[Server] Received ${signal}. Shutting down gracefully...`);
+  server.close(() => {
+    console.log('[Server] HTTP connections closed.');
+    try {
+      const db = require('./database/db');
+      if (db && typeof db.close === 'function') {
+        db.close();
+        console.log('[Server] SQLite database connection closed.');
+      }
+    } catch (_) {}
+    process.exit(0);
+  });
+
+  // Force shutdown after 10s if connections fail to drain
+  setTimeout(() => {
+    console.error('[Server] Forcing shutdown after timeout.');
+    process.exit(1);
+  }, 10000).unref();
+}
+
+process.on('SIGTERM', () => handleShutdown('SIGTERM'));
+process.on('SIGINT', () => handleShutdown('SIGINT'));

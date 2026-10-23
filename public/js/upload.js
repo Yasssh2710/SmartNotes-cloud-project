@@ -360,6 +360,17 @@ async function renderRecentUploadsTable() {
     const res = await fetch('/api/files');
     const data = await res.json();
 
+    const storageBadge = document.getElementById('storageModeBadge');
+    if (storageBadge && data) {
+      if (data.isS3Configured) {
+        storageBadge.className = 'badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1';
+        storageBadge.innerHTML = '<i class="fa-brands fa-aws me-1"></i> Amazon S3';
+      } else {
+        storageBadge.className = 'badge bg-secondary-subtle text-secondary border border-secondary-subtle px-2 py-1';
+        storageBadge.innerHTML = '<i class="fa-solid fa-database me-1"></i> Database Storage';
+      }
+    }
+
     if (!res.ok || !data.success || !data.files || data.files.length === 0) {
       tbody.innerHTML = `
         <tr>

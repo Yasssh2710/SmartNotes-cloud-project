@@ -409,6 +409,20 @@ async function main() {
     }
   });
 
+  await runTest('OCR Diagnostics: getTesseractDiagnostics returns valid environment and language metadata', async () => {
+    const diag = await ocrService.getTesseractDiagnostics();
+    assert(diag, 'Diagnostics object must be returned');
+    assert(typeof diag.engTrainedDataExists === 'boolean', 'engTrainedDataExists must be a boolean');
+    assert(typeof diag.engTrainedDataReadable === 'boolean', 'engTrainedDataReadable must be a boolean');
+    assert(Array.isArray(diag.availableLangs), 'availableLangs must be an array');
+    assert(diag.engTrainedDataExists === true, 'eng.traineddata must exist in repository or system');
+  });
+
+  await runTest('OCR Subprocess: ocrImageNative handles missing or 0-byte PNG inputs safely', async () => {
+    const missingResult = await ocrService.ocrImageNative('tesseract', 'non_existent_image_12345.png', { pageNum: 99 });
+    assert.strictEqual(missingResult, '', 'Missing image must return empty string without unhandled crash');
+  });
+
   // =========================================================================
   // 6. ERROR HANDLING & RESOURCE LIMIT TESTS
   // =========================================================================
@@ -783,6 +797,72 @@ async function main() {
     assert(typeof mockQuiz[0].explanation === 'string');
   });
 
+  await runTest('Gemini: extractJson repairs bad escape characters (LaTeX backslashes, unescaped newlines, trailing commas)', () => {
+    // Exact failure case seen in Render logs: Bad escaped character in JSON (e.g. \theta, \alpha, \frac)
+    const malformedOutput = '```json\n{\n  "quickSummary": "Formula \\alpha + \\beta where \\theta = \\frac{1}{2} and path C:\\data.",\n  "keyPoints": [\n    "Point with \\invalid escape sequence",\n    "Point with trailing comma",\n  ],\n  "definitions": [\n    { "term": "Term1", "meaning": "Meaning1" }\n  ],\n  "examRevision": [\n    "Tip 1"\n  ],\n  "keywords": ["LaTeX", "Math", "Escapes"]\n}\n```';
+
+    const parsed = geminiService.extractJson(malformedOutput);
+    assert(parsed, 'Must successfully parse repaired JSON');
+    assert(parsed.quickSummary.includes('Formula'), 'Must extract quickSummary');
+    assert.strictEqual(parsed.keyPoints.length, 2, 'Must preserve keyPoints');
+    assert.strictEqual(parsed.definitions.length, 1, 'Must preserve definitions');
+  });
+
+  await runTest('Gemini: validateSummarySchema validates required fields and sets safe defaults', () => {
+    const valid = {
+      quickSummary: 'Core concept of distributed computing.',
+      keyPoints: ['Point 1', 'Point 2']
+    };
+    const validated = geminiService.validateSummarySchema(valid);
+    assert.strictEqual(validated.quickSummary, 'Core concept of distributed computing.');
+    assert.strictEqual(validated.keyPoints.length, 2);
+    assert(Array.isArray(validated.definitions), 'Missing definitions must default to empty array');
+    assert(Array.isArray(validated.examRevision), 'Missing examRevision must default to empty array');
+    assert(Array.isArray(validated.keywords), 'Missing keywords must default to empty array');
+
+    // Missing required fields must throw
+    assert.throws(() => geminiService.validateSummarySchema({}), /quickSummary/);
+    assert.throws(() => geminiService.validateSummarySchema({ quickSummary: 'Hi', keyPoints: [] }), /keyPoints/);
+  });
+
+  await runTest('Gemini: validateQuizSchema validates 5-MCQ format and bounds correctAnswer', () => {
+    const validQuiz = [
+      {
+        id: 1,
+        question: 'What is a Lamport timestamp?',
+        options: ['Logical clock', 'Physical clock', 'NTP server', 'GPS clock'],
+        correctAnswer: 0,
+        explanation: 'Lamport timestamps provide logical clock synchronization.'
+      }
+    ];
+
+    const validated = geminiService.validateQuizSchema(validQuiz);
+    assert.strictEqual(validated.length, 1);
+    assert.strictEqual(validated[0].options.length, 4);
+    assert.strictEqual(validated[0].correctAnswer, 0);
+
+    // Invalid quiz must throw
+    assert.throws(() => geminiService.validateQuizSchema([]), /non-empty/);
+  });
+
+  await runTest('Gemini: getCandidateModels includes default models and respects GEMINI_MODEL override', () => {
+    const defaults = geminiService.getCandidateModels();
+    assert(defaults.includes('gemini-3.5-flash-lite'), 'Must include gemini-3.5-flash-lite');
+    assert(defaults.includes('gemini-3.8-flash'), 'Must include gemini-3.8-flash');
+
+    process.env.GEMINI_MODEL = 'gemini-custom-experimental';
+    try {
+      const customModels = geminiService.getCandidateModels();
+      assert.strictEqual(customModels[0], 'gemini-custom-experimental', 'Custom model must be prioritized first');
+    } finally {
+      delete process.env.GEMINI_MODEL;
+    }
+  });
+
+  await runTest('OCR: Tesseract subprocess environment restricts OMP_THREAD_LIMIT to 1 for Render Free 512MB RAM', () => {
+    assert.strictEqual(process.env.OMP_THREAD_LIMIT, '1', 'OMP_THREAD_LIMIT must be set to 1');
+  });
+
   // =========================================================================
   // 9. FULL-DOCUMENT OCR & BACKGROUND QUEUE DURABILITY TESTS
   // =========================================================================
@@ -906,6 +986,29 @@ async function main() {
     // Job retry count should be incremented
     const jobRow = db.prepare('SELECT retry_count, status FROM ocr_jobs WHERE file_id = ?').get(testFileId);
     assert.strictEqual(jobRow.retry_count, 1);
+  });
+
+  await runTest('OCR Queue: Enforce bounded retry limit (MAX_PAGE_RETRY_COUNT = 3)', () => {
+    const insert = db.prepare(`
+      INSERT INTO files (user_id, original_filename, s3_key, file_type, file_size, subject, status)
+      VALUES (1, 'max_retry_test.pdf', 'db:max_retry.pdf', 'application/pdf', 2048, 'OS', 'ready')
+    `).run();
+    const testFileId = insert.lastInsertRowid;
+
+    db.prepare(`
+      INSERT INTO ocr_jobs (file_id, user_id, status, retry_count)
+      VALUES (?, 1, 'partially_failed', 3)
+    `).run(testFileId);
+
+    db.prepare(`
+      INSERT INTO file_pages (file_id, page_number, status, is_ocr)
+      VALUES (?, 1, 'failed', 1)
+    `).run(testFileId);
+
+    const retryRes = ocrQueue.retryFailedPages(testFileId, 1);
+    assert.strictEqual(retryRes.success, false, 'Should reject retry when retry_count >= 3');
+    assert.strictEqual(retryRes.maxRetriesReached, true, 'maxRetriesReached flag must be true');
+    assert(retryRes.message.includes('Maximum retry limit'), 'Message must indicate limit reached');
   });
 
   await runTest('OCR Queue: recoverInterruptedJobs safely re-queues processing jobs after server restart', () => {
@@ -1050,9 +1153,9 @@ Vector clocks extend Lamport timestamps to determine whether two events are caus
 
   // Cleanup test records
   try {
-    db.prepare("DELETE FROM ocr_jobs WHERE file_id IN (SELECT id FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf'))").run();
-    db.prepare("DELETE FROM file_pages WHERE file_id IN (SELECT id FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf'))").run();
-    db.prepare("DELETE FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf')").run();
+    db.prepare("DELETE FROM ocr_jobs WHERE file_id IN (SELECT id FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf', 'max_retry_test.pdf'))").run();
+    db.prepare("DELETE FROM file_pages WHERE file_id IN (SELECT id FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf', 'max_retry_test.pdf'))").run();
+    db.prepare("DELETE FROM files WHERE original_filename IN ('queue_test.pdf', 'retry_test.pdf', 'restart_test.pdf', 'metrics_test.pdf', 'in_progress.pdf', 'corrupted.pdf', 'max_retry_test.pdf')").run();
   } catch (cleanErr) {
     // Ignore cleanup error
   }

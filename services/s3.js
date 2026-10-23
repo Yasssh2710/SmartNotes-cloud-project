@@ -11,7 +11,19 @@ const fs = require('fs');
 const path = require('path');
 
 // Ensure local uploads directory exists for disk caching / offline fallback
-const localUploadsDir = path.join(__dirname, '..', 'uploads');
+const persistentStorageBase = (process.env.STORAGE_DIR || process.env.AZURE_STORAGE_PATH || '').trim();
+
+let storageDir;
+if (persistentStorageBase) {
+  const resolvedBase = path.resolve(persistentStorageBase);
+  storageDir = (path.basename(resolvedBase).toLowerCase() === 'uploads' || path.basename(resolvedBase).toLowerCase() === 'database')
+    ? path.dirname(resolvedBase)
+    : resolvedBase;
+} else {
+  storageDir = path.join(__dirname, '..');
+}
+
+const localUploadsDir = path.join(storageDir, 'uploads');
 try {
   if (!fs.existsSync(localUploadsDir)) {
     fs.mkdirSync(localUploadsDir, { recursive: true });

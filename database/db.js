@@ -8,13 +8,31 @@ const fs = require('fs');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 
-// Ensure database directory exists
-const dbDir = path.join(__dirname);
+// Configurable storage directory for persistent SQLite on Azure App Service (STORAGE_DIR or AZURE_STORAGE_PATH)
+const persistentStorageBase = (process.env.STORAGE_DIR || process.env.AZURE_STORAGE_PATH || '').trim();
+
+let dbDir;
+let dbPath;
+
+if (process.env.DB_PATH) {
+  dbPath = path.resolve(process.env.DB_PATH);
+  dbDir = path.dirname(dbPath);
+} else if (persistentStorageBase) {
+  const resolvedBase = path.resolve(persistentStorageBase);
+  dbDir = path.basename(resolvedBase).toLowerCase() === 'database'
+    ? resolvedBase
+    : path.join(resolvedBase, 'database');
+  dbPath = path.join(dbDir, 'smartnotes.db');
+} else {
+  dbDir = path.join(__dirname);
+  dbPath = path.join(dbDir, 'smartnotes.db');
+}
+
 if (!fs.existsSync(dbDir)) {
   fs.mkdirSync(dbDir, { recursive: true });
 }
 
-const dbPath = path.join(dbDir, 'smartnotes.db');
+console.log(`[Database] Initializing SQLite database at: ${dbPath}`);
 const db = new Database(dbPath);
 
 // Enable foreign key support

@@ -9,15 +9,91 @@ const path = require('path');
 // Explicitly load .env with absolute path to ensure environment variables are present
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
-const { GoogleGenAI } = require('@google/genai');
+const { GoogleGenAI, Type } = require('@google/genai');
 
 // High-speed, high-availability Gemini models with automated fallback
-const GEMINI_MODELS = [
+const DEFAULT_GEMINI_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-3.8-flash',
   'gemini-3.6-flash',
   'gemini-3.1-flash-lite'
 ];
+
+/**
+ * Returns candidate Gemini models prioritizing custom environment variable if specified
+ * @returns {string[]}
+ */
+function getCandidateModels() {
+  const custom = (process.env.GEMINI_MODEL || '').trim();
+  if (custom && !DEFAULT_GEMINI_MODELS.includes(custom)) {
+    return [custom, ...DEFAULT_GEMINI_MODELS];
+  }
+  return DEFAULT_GEMINI_MODELS;
+}
+
+// Structured JSON output schemas supported by @google/genai
+const SUMMARY_RESPONSE_SCHEMA = {
+  type: Type.OBJECT,
+  properties: {
+    quickSummary: {
+      type: Type.STRING,
+      description: '2-3 dense sentences explaining the core concept.'
+    },
+    keyPoints: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: 'Key takeaway bullet points.'
+    },
+    definitions: {
+      type: Type.ARRAY,
+      items: {
+        type: Type.OBJECT,
+        properties: {
+          term: { type: Type.STRING, description: 'Term name' },
+          meaning: { type: Type.STRING, description: 'Precise academic definition' }
+        },
+        required: ['term', 'meaning']
+      },
+      description: 'List of academic terms and their definitions.'
+    },
+    examRevision: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: 'High-yield exam revision tips.'
+    },
+    keywords: {
+      type: Type.ARRAY,
+      items: { type: Type.STRING },
+      description: 'Key subject keywords.'
+    }
+  },
+  required: ['quickSummary', 'keyPoints', 'definitions', 'examRevision', 'keywords']
+};
+
+const QUIZ_RESPONSE_SCHEMA = {
+  type: Type.ARRAY,
+  items: {
+    type: Type.OBJECT,
+    properties: {
+      id: { type: Type.INTEGER, description: 'Question number (1 to 5)' },
+      question: { type: Type.STRING, description: 'Clear academic question text' },
+      options: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Four distinct multiple-choice answer options'
+      },
+      correctAnswer: {
+        type: Type.INTEGER,
+        description: 'Zero-based index of the correct option (0, 1, 2, or 3)'
+      },
+      explanation: {
+        type: Type.STRING,
+        description: 'Detailed explanation of why this answer is correct'
+      }
+    },
+    required: ['id', 'question', 'options', 'correctAnswer', 'explanation']
+  }
+};
 
 /**
  * Retrieves and sanitizes the Gemini API key from environment variables.
@@ -114,22 +190,220 @@ function logGeminiError(operation, model, err) {
 }
 
 /**
- * Helper to safely extract and parse JSON from AI response
+ * Helper to safely extract, repair, and parse JSON from AI model response.
+ * Handles markdown fences, raw LaTeX backslashes, bad escape sequences,
+ * and literal newlines inside JSON strings without failing.
  * @param {string} responseText
  * @returns {any}
  */
 function extractJson(responseText) {
-  if (!responseText) throw new Error('Empty response from AI model');
-  let cleaned = responseText.replace(/```json/gi, '').replace(/```/g, '').trim();
+  if (!responseText || typeof responseText !== 'string' || !responseText.trim()) {
+    throw new Error('Empty response received from AI model.');
+  }
+
+  // 1. Strip markdown code fences (e.g. ```json ... ```)
+  let cleaned = responseText
+    .replace(/^```json\s*/im, '')
+    .replace(/^```\s*/im, '')
+    .replace(/\s*```$/m, '')
+    .trim();
+
+  // 2. Find outermost JSON object {...} or array [...]
+  const firstBrace = cleaned.indexOf('{');
+  const firstBracket = cleaned.indexOf('[');
+  let startIdx = -1;
+  let endIdx = -1;
+
+  if (firstBrace !== -1 && (firstBracket === -1 || firstBrace < firstBracket)) {
+    startIdx = firstBrace;
+    endIdx = cleaned.lastIndexOf('}');
+  } else if (firstBracket !== -1) {
+    startIdx = firstBracket;
+    endIdx = cleaned.lastIndexOf(']');
+  }
+
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    cleaned = cleaned.substring(startIdx, endIdx + 1);
+  }
+
+  // 3. Try standard JSON.parse first
   try {
     return JSON.parse(cleaned);
-  } catch (parseErr) {
-    const jsonMatch = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
+  } catch (initialErr) {
+    // 4. Repair invalid escapes inside string literals
+    // In JSON (RFC 8259), valid 2-char escapes are: \", \\, \/, \b, \f, \n, \r, \t, \uXXXX
+    // Academic notes often contain math/LaTeX (e.g. \theta, \alpha, \frac) or file paths (e.g. C:\path)
+    let repaired = '';
+    let inString = false;
+    let i = 0;
+
+    while (i < cleaned.length) {
+      const ch = cleaned[i];
+
+      if (!inString) {
+        if (ch === '"') {
+          inString = true;
+          repaired += ch;
+          i++;
+        } else {
+          repaired += ch;
+          i++;
+        }
+      } else {
+        // Inside string literal
+        if (ch === '"') {
+          inString = false;
+          repaired += ch;
+          i++;
+        } else if (ch === '\\') {
+          const next = cleaned[i + 1];
+          if (!next) {
+            repaired += '\\\\';
+            i++;
+          } else if (next === '"' || next === '\\' || next === '/' || next === 'b' || next === 'f' || next === 'n' || next === 'r' || next === 't') {
+            repaired += ch + next;
+            i += 2;
+          } else if (next === 'u') {
+            const hex = cleaned.substring(i + 2, i + 6);
+            if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+              repaired += '\\u' + hex;
+              i += 6;
+            } else {
+              repaired += '\\\\u';
+              i += 2;
+            }
+          } else {
+            // Invalid escape character: double the backslash to preserve literal text
+            repaired += '\\\\' + next;
+            i += 2;
+          }
+        } else if (ch === '\n') {
+          repaired += '\\n';
+          i++;
+        } else if (ch === '\r') {
+          repaired += '\\r';
+          i++;
+        } else if (ch === '\t') {
+          repaired += '\\t';
+          i++;
+        } else {
+          repaired += ch;
+          i++;
+        }
+      }
     }
-    throw parseErr;
+
+    // Strip trailing commas before } or ]
+    repaired = repaired.replace(/,\s*([}\]])/g, '$1');
+
+    try {
+      return JSON.parse(repaired);
+    } catch (secondErr) {
+      // If still failing, attempt regex matching of first structured block
+      const jsonMatch = cleaned.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+      if (jsonMatch && jsonMatch[0] !== cleaned) {
+        return JSON.parse(jsonMatch[0]);
+      }
+      throw secondErr;
+    }
   }
+}
+
+/**
+ * Validates and normalizes the AI Summary schema
+ * @param {any} parsed
+ * @returns {Object}
+ */
+function validateSummarySchema(parsed) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('AI summary response is not a valid JSON object.');
+  }
+
+  const quickSummary = typeof parsed.quickSummary === 'string' ? parsed.quickSummary.trim() : '';
+  if (!quickSummary) {
+    throw new Error('AI summary response missing required "quickSummary" field.');
+  }
+
+  const keyPoints = Array.isArray(parsed.keyPoints)
+    ? parsed.keyPoints.filter(p => typeof p === 'string' && p.trim().length > 0).map(p => p.trim())
+    : [];
+
+  if (keyPoints.length === 0) {
+    throw new Error('AI summary response missing required "keyPoints" list.');
+  }
+
+  const definitions = Array.isArray(parsed.definitions)
+    ? parsed.definitions
+        .filter(d => d && typeof d === 'object' && d.term && d.meaning)
+        .map(d => ({ term: String(d.term).trim(), meaning: String(d.meaning).trim() }))
+    : [];
+
+  const examRevision = Array.isArray(parsed.examRevision)
+    ? parsed.examRevision.filter(e => typeof e === 'string' && e.trim().length > 0).map(e => e.trim())
+    : [];
+
+  const keywords = Array.isArray(parsed.keywords)
+    ? parsed.keywords.filter(k => typeof k === 'string' && k.trim().length > 0).map(k => k.trim())
+    : [];
+
+  return {
+    quickSummary,
+    keyPoints,
+    definitions,
+    examRevision,
+    keywords
+  };
+}
+
+/**
+ * Validates and normalizes the AI Quiz schema
+ * @param {any} parsed
+ * @returns {Array<Object>}
+ */
+function validateQuizSchema(parsed) {
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new Error('AI quiz response must be a non-empty JSON array of questions.');
+  }
+
+  const validatedQuestions = [];
+
+  for (let idx = 0; idx < parsed.length; idx++) {
+    const item = parsed[idx];
+    if (!item || typeof item !== 'object') continue;
+
+    const questionText = typeof item.question === 'string' ? item.question.trim() : '';
+    if (!questionText) continue;
+
+    const rawOptions = Array.isArray(item.options) ? item.options : [];
+    const options = rawOptions
+      .map(o => (typeof o === 'string' ? o.trim() : String(o || '').trim()))
+      .filter(o => o.length > 0);
+
+    if (options.length < 2) continue;
+
+    let correctAnswer = parseInt(item.correctAnswer, 10);
+    if (isNaN(correctAnswer) || correctAnswer < 0 || correctAnswer >= options.length) {
+      correctAnswer = 0;
+    }
+
+    const explanation = typeof item.explanation === 'string'
+      ? item.explanation.trim()
+      : `Option ${String.fromCharCode(65 + correctAnswer)} is the correct answer based on the study note content.`;
+
+    validatedQuestions.push({
+      id: idx + 1,
+      question: questionText,
+      options: options,
+      correctAnswer: correctAnswer,
+      explanation: explanation
+    });
+  }
+
+  if (validatedQuestions.length === 0) {
+    throw new Error('Could not validate any questions in the AI quiz response.');
+  }
+
+  return validatedQuestions;
 }
 
 /**
@@ -188,24 +462,21 @@ You must return a valid JSON object with EXACTLY the following structure (do not
 Only summarize information contained in the provided note. Do not invent or fabricate outside facts. Keep language simple and academic.`;
 
   let lastError = null;
+  const models = getCandidateModels();
 
-  for (const model of GEMINI_MODELS) {
+  for (const model of models) {
     try {
       const response = await ai.models.generateContent({
         model: model,
         contents: prompt,
         config: {
-          responseMimeType: 'application/json'
+          responseMimeType: 'application/json',
+          responseSchema: SUMMARY_RESPONSE_SCHEMA
         }
       });
 
       const parsed = extractJson(response.text || '');
-
-      if (!parsed.quickSummary || !Array.isArray(parsed.keyPoints)) {
-        throw new Error('AI summary response missing expected fields');
-      }
-
-      return parsed;
+      return validateSummarySchema(parsed);
     } catch (err) {
       lastError = err;
       logGeminiError('Summary', model, err);
@@ -253,24 +524,21 @@ Return a valid JSON array of EXACTLY 5 questions (no markdown ticks \`\`\`json, 
 Do not fabricate facts or questions outside the provided study note content.`;
 
   let lastError = null;
+  const models = getCandidateModels();
 
-  for (const model of GEMINI_MODELS) {
+  for (const model of models) {
     try {
       const response = await ai.models.generateContent({
         model: model,
         contents: prompt,
         config: {
-          responseMimeType: 'application/json'
+          responseMimeType: 'application/json',
+          responseSchema: QUIZ_RESPONSE_SCHEMA
         }
       });
 
       const parsed = extractJson(response.text || '');
-
-      if (!Array.isArray(parsed) || parsed.length === 0) {
-        throw new Error('Invalid quiz format received from AI model.');
-      }
-
-      return parsed;
+      return validateQuizSchema(parsed);
     } catch (err) {
       lastError = err;
       logGeminiError('Quiz', model, err);
@@ -467,7 +735,8 @@ Provide a clear, student-friendly, and well-structured answer:`;
   const ai = getGeminiClient();
   let lastError = null;
 
-  for (const model of GEMINI_MODELS) {
+  const models = getCandidateModels();
+  for (const model of models) {
     try {
       const response = await ai.models.generateContent({
         model: model,
@@ -519,6 +788,10 @@ module.exports = {
   getApiKey,
   getGeminiClient,
   sanitizeErrorMessage,
-  logGeminiError
+  logGeminiError,
+  extractJson,
+  validateSummarySchema,
+  validateQuizSchema,
+  getCandidateModels
 };
 
